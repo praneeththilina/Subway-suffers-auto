@@ -32,7 +32,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -41,9 +43,11 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -66,7 +70,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.feature.swipe.data.repository.SwipeTelemetryRepository
+import com.example.feature.swipe.domain.model.RunnerLane
 import com.example.service.SwipeControllerService
+import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.JetBrainsMonoFamily
@@ -87,73 +94,121 @@ fun SubwayRunnerSandboxModal(
 ) {
     BackHandler { onClose() }
 
-    // 3 lanes: -1 (Left), 0 (Center), 1 (Right)
-    var currentLane by remember { mutableIntStateOf(0) }
-    var actionStatus by remember { mutableStateOf("RUNNING ON TRACK") }
+    val visionState by SwipeTelemetryRepository.screenVisionState.collectAsState()
+    val currentLane = visionState.currentLane
+
+    var actionStatus by remember { mutableStateOf("START IN MIDDLE COLUMN (0)") }
     var isHoverboardActive by remember { mutableStateOf(false) }
-    var localJumpScore by remember { mutableIntStateOf(0) }
+    var obstaclesDodgedScore by remember { mutableIntStateOf(0) }
 
     val jumpProgress = remember { Animatable(0f) }
     val rollProgress = remember { Animatable(0f) }
 
     val animatedLaneOffset by animateFloatAsState(
-        targetValue = currentLane.toFloat(),
+        targetValue = currentLane.columnIndex.toFloat(),
         animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
         label = "lane_offset"
     )
 
     // React automatically whenever SwipeControllerService.performSwipe(...) is called!
+    // Note: currentLane is already updated & boundary-checked in SwipeTelemetryRepository!
     LaunchedEffect(latestDispatchedDirection) {
         val pair = latestDispatchedDirection ?: return@LaunchedEffect
         when (pair.first) {
             SwipeControllerService.DIRECTION_UP -> {
-                actionStatus = "⚡ AUTO-JUMP! performSwipe(\"UP\")"
-                localJumpScore += 1
+                actionStatus = "⚡ JUMP in ${currentLane.shortCode}!"
+                obstaclesDodgedScore += 1
                 jumpProgress.snapTo(0f)
-                jumpProgress.animateTo(1f, tween(340, easing = FastOutSlowInEasing))
-                jumpProgress.animateTo(0f, tween(320, easing = FastOutSlowInEasing))
-                actionStatus = "RUNNING ON TRACK"
+                jumpProgress.animateTo(1f, tween(320, easing = FastOutSlowInEasing))
+                jumpProgress.animateTo(0f, tween(300, easing = FastOutSlowInEasing))
+                actionStatus = "COLUMN: ${currentLane.label}"
             }
             SwipeControllerService.DIRECTION_DOWN -> {
-                actionStatus = "⬇ ROLL! performSwipe(\"DOWN\")"
+                actionStatus = "⬇ ROLL in ${currentLane.shortCode}!"
+                obstaclesDodgedScore += 1
                 rollProgress.snapTo(0f)
                 rollProgress.animateTo(1f, tween(280))
                 rollProgress.animateTo(0f, tween(260))
-                actionStatus = "RUNNING ON TRACK"
+                actionStatus = "COLUMN: ${currentLane.label}"
             }
             SwipeControllerService.DIRECTION_LEFT -> {
-                currentLane = (currentLane - 1).coerceAtLeast(-1)
-                actionStatus = "⬅ LANE LEFT! performSwipe(\"LEFT\")"
+                obstaclesDodgedScore += 1
+                actionStatus =
+                    "⬅ MOVED LEFT → ${currentLane.shortCode} (Can: ${currentLane.remainingStepsLeft}L, ${currentLane.remainingStepsRight}R)"
             }
             SwipeControllerService.DIRECTION_RIGHT -> {
-                currentLane = (currentLane + 1).coerceAtMost(1)
-                actionStatus = "➡ LANE RIGHT! performSwipe(\"RIGHT\")"
+                obstaclesDodgedScore += 1
+                actionStatus =
+                    "➡ MOVED RIGHT → ${currentLane.shortCode} (Can: ${currentLane.remainingStepsLeft}L, ${currentLane.remainingStepsRight}R)"
             }
             SwipeControllerService.DIRECTION_DOUBLE_TAP -> {
                 isHoverboardActive = !isHoverboardActive
-                actionStatus = "🛹 HOVERBOARD! performSwipe(\"DOUBLE_TAP\")"
+                actionStatus = "🛹 HOVERBOARD in ${currentLane.shortCode}!"
             }
         }
     }
 
-    // Infinite track tie animation
     val infiniteTransition = rememberInfiniteTransition(label = "track_ties")
     val trackPhase by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 650, easing = LinearEasing),
+            animation = tween(durationMillis = 620, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "phase"
     )
 
-    // Obstacle train barrier synced to approach the player
+    // Multi-column obstacle wave (-1 = Left, 0 = Middle, +1 = Right)
     var obstacleProgress by remember { mutableFloatStateOf(0f) }
+    var obstacleLaneIndex by remember { mutableIntStateOf(0) }
+    var obstacleType by remember { mutableStateOf("TRAIN") }
+    var autoEvadedCurrentWave by remember { mutableStateOf(false) }
+
     LaunchedEffect(Unit) {
+        val sequenceLanes = listOf(0, -1, 0, 1, 0, -1, 1)
+        val sequenceTypes = listOf("TRAIN", "LOW_BARRIER", "TRAIN", "HIGH_BARRIER")
+        var waveCounter = 0
+
         while (true) {
             delay(16L)
-            obstacleProgress = (obstacleProgress + 0.0055f) % 1f
+            val nextProgress = obstacleProgress + 0.0075f
+            if (nextProgress >= 1f) {
+                obstacleProgress = 0f
+                waveCounter++
+                obstacleLaneIndex = sequenceLanes[waveCounter % sequenceLanes.size]
+                obstacleType = sequenceTypes[waveCounter % sequenceTypes.size]
+                autoEvadedCurrentWave = false
+            } else {
+                obstacleProgress = nextProgress
+            }
+
+            // Compute real-time 3-column display hazards from the live track
+            val leftHaz = if (obstacleLaneIndex == -1) obstacleProgress else 0.08f
+            val midHaz = if (obstacleLaneIndex == 0) obstacleProgress else 0.08f
+            val rightHaz = if (obstacleLaneIndex == 1) obstacleProgress else 0.08f
+
+            val recommendedAction = SwipeTelemetryRepository.updateScreenVisionReadingAndDecideAction(
+                leftHazard = leftHaz,
+                middleHazard = midHaz,
+                rightHazard = rightHaz,
+                detectedPlayerColumn = null,
+                obstacleType = obstacleType
+            )
+
+            // If Display Reader Autopilot is enabled, automatically dispatch the evasive swipe
+            // when the obstacle enters the danger zone (progress >= 0.64f)!
+            if (visionState.isAutopilotEnabled &&
+                !autoEvadedCurrentWave &&
+                recommendedAction != null &&
+                obstacleProgress >= 0.64f
+            ) {
+                autoEvadedCurrentWave = true
+                SwipeControllerService.performSwipeWithSource(
+                    recommendedAction,
+                    "Display Reader Autopilot"
+                )
+            }
         }
     }
 
@@ -193,7 +248,7 @@ fun SubwayRunnerSandboxModal(
                         color = MaterialTheme.colorScheme.onBackground
                     )
                     Text(
-                        text = stringResource(R.string.sandbox_subtitle),
+                        text = "3 Columns: Left (-1) • Middle (0) • Right (+1)",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -211,25 +266,21 @@ fun SubwayRunnerSandboxModal(
                     horizontalAlignment = Alignment.End
                 ) {
                     Text(
-                        text = "JUMPS: $localJumpScore",
+                        text = "COL: ${currentLane.shortCode}",
                         style = MaterialTheme.typography.labelLarge,
-                        color = ElectricCyan
+                        color = EmeraldPulse
                     )
                     Text(
-                        text = if (isAutoJumpRunning) {
-                            String.format("Next UP: %.1fs", autoJumpCountdownMs / 1000f)
-                        } else {
-                            "3s Timer Paused"
-                        },
+                        text = "Can: ${currentLane.remainingStepsLeft}L / ${currentLane.remainingStepsRight}R • #$obstaclesDodgedScore",
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = JetBrainsMonoFamily,
-                        color = if (isAutoJumpRunning) KineticCoral else MaterialTheme.colorScheme.onSurfaceVariant
+                        color = ElectricCyan
                     )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
         // Live 3-Lane Endless Runner Track Canvas
         var dragDeltaX by remember { mutableFloatStateOf(0f) }
@@ -282,7 +333,6 @@ fun SubwayRunnerSandboxModal(
                 val w = size.width
                 val h = size.height
 
-                // Horizon sky and subway track background
                 drawRect(
                     brush = Brush.verticalGradient(
                         colors = listOf(Color(0xFF06101E), Color(0xFF0F172A), Color(0xFF090D16))
@@ -297,38 +347,50 @@ fun SubwayRunnerSandboxModal(
                     strokeWidth = 3f
                 )
 
-                // Draw 3 perspective railway lanes
-                val topSpread = w * 0.22f
+                val topSpread = w * 0.24f
                 val bottomSpread = w * 0.86f
 
                 for (laneIdx in -1..1) {
                     val topX = (w / 2f) + laneIdx * (topSpread / 2f)
                     val bottomX = (w / 2f) + laneIdx * (bottomSpread / 3f)
+                    val isPlayerInThisLane = currentLane.columnIndex == laneIdx
 
-                    // Left & Right rails per lane
                     drawLine(
-                        color = Color(0xFF334155),
+                        color = if (isPlayerInThisLane) EmeraldPulse.copy(alpha = 0.65f) else Color(0xFF334155),
                         start = Offset(topX - 10f, horizonY),
                         end = Offset(bottomX - 38f, h),
-                        strokeWidth = 4f
+                        strokeWidth = if (isPlayerInThisLane) 6f else 4f
                     )
                     drawLine(
-                        color = Color(0xFF334155),
+                        color = if (isPlayerInThisLane) EmeraldPulse.copy(alpha = 0.65f) else Color(0xFF334155),
                         start = Offset(topX + 10f, horizonY),
                         end = Offset(bottomX + 38f, h),
-                        strokeWidth = 4f
+                        strokeWidth = if (isPlayerInThisLane) 6f else 4f
                     )
 
-                    // Center glowing guide line
                     drawLine(
-                        color = ElectricCyan.copy(alpha = 0.2f),
+                        color = if (isPlayerInThisLane) EmeraldPulse.copy(alpha = 0.45f) else ElectricCyan.copy(alpha = 0.2f),
                         start = Offset(topX, horizonY),
                         end = Offset(bottomX, h),
+                        strokeWidth = 2.5f
+                    )
+                }
+
+                // Display Reader Lookahead Scan Band (42% .. 60% Y)
+                if (visionState.isAutopilotEnabled) {
+                    drawRect(
+                        color = EmeraldPulse.copy(alpha = 0.08f),
+                        topLeft = Offset(0f, h * 0.42f),
+                        size = Size(w, h * 0.18f)
+                    )
+                    drawLine(
+                        color = EmeraldPulse.copy(alpha = 0.55f),
+                        start = Offset(0f, h * 0.55f),
+                        end = Offset(w, h * 0.55f),
                         strokeWidth = 2f
                     )
                 }
 
-                // Animated horizontal wooden/neon sleepers moving down
                 val numSleepers = 9
                 for (i in 0 until numSleepers) {
                     val t = ((i.toFloat() / numSleepers) + trackPhase) % 1f
@@ -342,28 +404,35 @@ fun SubwayRunnerSandboxModal(
                     )
                 }
 
-                // Draw approaching jump barrier in player's lane
+                // Draw Approaching Obstacle in obstacleLaneIndex (-1, 0, or +1)
                 val barrierT = obstacleProgress
                 val barrierY = horizonY + (h * 0.78f - horizonY) * (barrierT * barrierT)
                 val barrierScale = 0.25f + 0.75f * (barrierT * barrierT)
-                val barrierLaneX = (w / 2f) + animatedLaneOffset * ((bottomSpread / 3f) * barrierScale)
-                val barrierWidth = 110f * barrierScale
-                val barrierHeight = 36f * barrierScale
+                val topObsX = (w / 2f) + obstacleLaneIndex * (topSpread / 2f)
+                val bottomObsX = (w / 2f) + obstacleLaneIndex * (bottomSpread / 3f)
+                val barrierLaneX = topObsX + (bottomObsX - topObsX) * (barrierT * barrierT)
+
+                val barrierWidth = 118f * barrierScale
+                val barrierHeight = if (obstacleType == "TRAIN") 78f * barrierScale else 38f * barrierScale
+                val obstacleColor = when (obstacleType) {
+                    "TRAIN" -> KineticCoral
+                    "HIGH_BARRIER" -> AmberWarning
+                    else -> Color(0xFFF43F5E)
+                }
 
                 drawRoundRect(
-                    color = KineticCoral.copy(alpha = 0.85f),
+                    color = obstacleColor.copy(alpha = 0.90f),
                     topLeft = Offset(barrierLaneX - barrierWidth / 2f, barrierY - barrierHeight),
                     size = Size(barrierWidth, barrierHeight),
-                    cornerRadius = CornerRadius(8f, 8f)
+                    cornerRadius = CornerRadius(10f, 10f)
                 )
 
-                // Draw Surfer Character at bottom
+                // Draw Surfer Character at bottom in currentLane
                 val playerBaseY = h * 0.78f
                 val playerLaneX = (w / 2f) + animatedLaneOffset * (bottomSpread / 3f)
                 val jumpOffsetPx = jumpProgress.value * (h * 0.26f)
                 val currentPlayerY = playerBaseY - jumpOffsetPx
 
-                // Ground shadow shrinks while jumping
                 val shadowRadius = 46f * (1f - jumpProgress.value * 0.5f)
                 drawOval(
                     color = Color.Black.copy(alpha = 0.55f),
@@ -371,7 +440,6 @@ fun SubwayRunnerSandboxModal(
                     size = Size(shadowRadius * 2f, 22f)
                 )
 
-                // Optional Hoverboard under character
                 if (isHoverboardActive) {
                     val boardPath = Path().apply {
                         moveTo(playerLaneX - 54f, currentPlayerY + 18f)
@@ -383,12 +451,10 @@ fun SubwayRunnerSandboxModal(
                     drawPath(path = boardPath, color = KineticCoral)
                 }
 
-                // Character body (squashes during Roll, stretches + glows during Jump)
                 val bodyHeight = if (rollProgress.value > 0.2f) 56f else 96f
                 val bodyWidth = if (rollProgress.value > 0.2f) 68f else 54f
 
                 if (jumpProgress.value > 0.05f) {
-                    // Neon jump aura ring
                     drawCircle(
                         color = ElectricCyan.copy(alpha = 0.45f * jumpProgress.value),
                         radius = 74f,
@@ -410,7 +476,6 @@ fun SubwayRunnerSandboxModal(
                     cornerRadius = CornerRadius(18f, 18f)
                 )
 
-                // Character visor/head
                 drawCircle(
                     color = Color.White,
                     radius = 18f,
@@ -419,57 +484,91 @@ fun SubwayRunnerSandboxModal(
             }
 
             // Status HUD pill overlay at top of track
-            Box(
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 14.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(Color(0xDD090D16))
-                    .border(1.dp, ElectricCyan, RoundedCornerShape(50))
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(top = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(
-                    text = actionStatus,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = if (jumpProgress.value > 0.05f) EmeraldPulse else ElectricCyan
-                )
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Color(0xDD090D16))
+                        .border(
+                            1.dp,
+                            if (visionState.blockedBoundaryMoveMessage != null) KineticCoral else ElectricCyan,
+                            RoundedCornerShape(50)
+                        )
+                        .padding(horizontal = 16.dp, vertical = 7.dp)
+                ) {
+                    Text(
+                        text = visionState.blockedBoundaryMoveMessage ?: actionStatus,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = when {
+                            visionState.blockedBoundaryMoveMessage != null -> KineticCoral
+                            jumpProgress.value > 0.05f -> EmeraldPulse
+                            else -> ElectricCyan
+                        }
+                    )
+                }
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // Bottom Controls inside Sandbox for instant testing
+        // Bottom Controls inside Sandbox: Display Autopilot Toggle + Reset Middle + Jump Now
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Button(
-                onClick = onToggleAutoJump,
+                onClick = {
+                    SwipeTelemetryRepository.setAutopilotEnabled(!visionState.isAutopilotEnabled)
+                },
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isAutoJumpRunning) KineticCoral else ElectricCyan,
-                    contentColor = if (isAutoJumpRunning) Color.White else Color(0xFF041318)
+                    containerColor = if (visionState.isAutopilotEnabled) KineticCoral else EmeraldPulse,
+                    contentColor = if (visionState.isAutopilotEnabled) Color.White else Color(0xFF022C22)
                 ),
                 modifier = Modifier
-                    .weight(1f)
-                    .height(52.dp)
-                    .testTag("sandbox_toggle_auto_jump_button")
+                    .weight(1.3f)
+                    .height(50.dp)
+                    .testTag("sandbox_toggle_autopilot_button")
             ) {
                 Icon(
-                    imageVector = if (isAutoJumpRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
+                    imageVector = if (visionState.isAutopilotEnabled) Icons.Default.Stop else Icons.Default.Visibility,
                     contentDescription = null
                 )
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (isAutoJumpRunning) "STOP 3s AUTO-JUMP" else "START 3s AUTO-JUMP",
-                    fontWeight = FontWeight.Bold
+                    text = if (visionState.isAutopilotEnabled) "STOP AUTOPILOT" else "DISPLAY AUTOPILOT",
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
                 )
+            }
+
+            OutlinedButton(
+                onClick = {
+                    SwipeTelemetryRepository.resetLaneToMiddle()
+                    actionStatus = "RESET TO MIDDLE COLUMN (0)"
+                },
+                modifier = Modifier
+                    .height(50.dp)
+                    .testTag("sandbox_reset_middle_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.RestartAlt,
+                    contentDescription = "Reset to Middle",
+                    tint = EmeraldPulse
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("M(0)", color = EmeraldPulse)
             }
 
             FilledTonalButton(
                 onClick = { onTriggerManualSwipe(SwipeControllerService.DIRECTION_UP) },
                 modifier = Modifier
-                    .height(52.dp)
+                    .height(50.dp)
                     .testTag("sandbox_manual_jump_button")
             ) {
                 Icon(
@@ -477,8 +576,6 @@ fun SubwayRunnerSandboxModal(
                     contentDescription = null,
                     tint = ElectricCyan
                 )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("JUMP NOW")
             }
         }
     }

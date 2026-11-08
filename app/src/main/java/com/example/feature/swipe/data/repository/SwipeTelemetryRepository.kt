@@ -5,6 +5,8 @@ import com.example.feature.swipe.domain.model.GestureStrokePoint
 import com.example.feature.swipe.domain.model.GestureTelemetryEvent
 import com.example.feature.swipe.domain.model.MovementInputMode
 import com.example.feature.swipe.domain.model.PoseCalibrationState
+import com.example.feature.swipe.domain.model.RunnerLane
+import com.example.feature.swipe.domain.model.ScreenVisionAutopilotState
 import com.example.feature.swipe.domain.model.SwipeTuningConfig
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
@@ -28,7 +30,7 @@ object SwipeTelemetryRepository {
     private val _isCameraPreviewEnabledInOverlay = MutableStateFlow(true)
     val isCameraPreviewEnabledInOverlay: StateFlow<Boolean> = _isCameraPreviewEnabledInOverlay.asStateFlow()
 
-    private val _movementInputMode = MutableStateFlow(MovementInputMode.CAMERA_POSE)
+    private val _movementInputMode = MutableStateFlow(MovementInputMode.SCREEN_VISION_AUTOPILOT)
     val movementInputMode: StateFlow<MovementInputMode> = _movementInputMode.asStateFlow()
 
     private val _isMovementTrackingActive = MutableStateFlow(false)
@@ -36,6 +38,10 @@ object SwipeTelemetryRepository {
 
     private val _poseCalibrationState = MutableStateFlow(PoseCalibrationState())
     val poseCalibrationState: StateFlow<PoseCalibrationState> = _poseCalibrationState.asStateFlow()
+
+    // 3-Column Lane State & Screen Vision Display Reader State (starts in MIDDLE column = 0)
+    private val _screenVisionState = MutableStateFlow(ScreenVisionAutopilotState())
+    val screenVisionState: StateFlow<ScreenVisionAutopilotState> = _screenVisionState.asStateFlow()
 
     private val _isAutoJumpRunning = MutableStateFlow(false)
     val isAutoJumpRunning: StateFlow<Boolean> = _isAutoJumpRunning.asStateFlow()
@@ -58,14 +64,9 @@ object SwipeTelemetryRepository {
     private val _latestDispatchedDirection = MutableStateFlow<Pair<String, Long>?>(null)
     val latestDispatchedDirection: StateFlow<Pair<String, Long>?> = _latestDispatchedDirection.asStateFlow()
 
-    private val _lastActionLabel = MutableStateFlow("READY")
+    private val _lastActionLabel = MutableStateFlow("READY (MIDDLE)")
     val lastActionLabel: StateFlow<String> = _lastActionLabel.asStateFlow()
 
-    // Decoupled Horizontal & Vertical State Machine Variables:
-    // - Allows Jump-Cancel (vertical UP/DOWN triggers immediately even while horizontal X is locked
-    //   in WAITING_FOR_NEUTRAL or horizontal 250ms debounce).
-    // - Prevents returning the body/hand to center from accidentally swiping in the opposite direction
-    //   by requiring at least 100ms dwell time inside the center Neutral Box before unlocking.
     @Volatile
     private var lastHorizontalTriggerMs: Long = -10_000L
 
@@ -89,12 +90,206 @@ object SwipeTelemetryRepository {
         }
     }
 
+    /**
+     * Resets the player's tracked position to the MIDDLE column (0) — e.g. when starting a new run.
+     */
+    fun resetLaneToMiddle() {
+        _screenVisionState.update {
+            it.copy(
+                currentLane = RunnerLane.MIDDLE,
+                detectedPlayerLane = RunnerLane.MIDDLE,
+                blockedBoundaryMoveMessage = null,
+                lastAutopilotDecision = "Reset to MIDDLE Column (Can go 1 Left or 1 Right)"
+            )
+        }
+        _lastActionLabel.value = "MIDDLE (0)"
+    }
+
+    /**
+     * Synchronizes the player's column if the Screen Display Reader visually detects the character
+     * in a specific column (`LEFT`, `MIDDLE`, or `RIGHT`).
+     */
+    fun syncDetectedPlayerLaneFromDisplay(detectedLane: RunnerLane) {
+        _screenVisionState.update {
+            it.copy(
+                currentLane = detectedLane,
+                detectedPlayerLane = detectedLane,
+                blockedBoundaryMoveMessage = null
+            )
+        }
+    }
+
+    /**
+     * Validates whether a requested direction is legal given the 3-column geometry:
+     * - Starts in [RunnerLane.MIDDLE] (0).
+     * - If in [RunnerLane.LEFT] (-1): blocks another "LEFT" swipe! Allows up to 2 "RIGHT" swipes.
+     * - If in [RunnerLane.RIGHT] (+1): blocks another "RIGHT" swipe! Allows up to 2 "LEFT" swipes.
+     * - "UP", "DOWN", and "DOUBLE_TAP" are always allowed in any column.
+     *
+     * When valid, advances `currentLane` and returns `true`. When blocked at a boundary, records
+     * the boundary block message and returns `false`.
+     */
+    fun validateAndAdvanceColumnForSwipe(direction: String, source: String = "Swipe Engine"): Boolean {
+        val normalized = direction.trim().uppercase()
+        val currentLane = _screenVisionState.value.currentLane
+
+        when (normalized) {
+            "LEFT" -> {
+                if (!currentLane.canMoveLeft) {
+                    val msg = "BLOCKED LEFT: Player is already in LEFT column (-1)! Can move up to 2 RIGHT."
+                    _screenVisionState.update {
+                        it.copy(
+                            blockedBoundaryMoveMessage = msg,
+                            lastAutopilotDecision = msg
+                        )
+                    }
+                    _lastActionLabel.value = "BLOCKED (AT LEFT)"
+                    return false
+                }
+                val nextLane = RunnerLane.fromColumnIndex(currentLane.columnIndex - 1)
+                _screenVisionState.update {
+                    it.copy(
+                        currentLane = nextLane,
+                        detectedPlayerLane = nextLane,
+                        blockedBoundaryMoveMessage = null,
+                        lastAutopilotDecision = "Moved LEFT: ${currentLane.shortCode} → ${nextLane.shortCode} " +
+                            "(Rem: ${nextLane.remainingStepsLeft}L, ${nextLane.remainingStepsRight}R)"
+                    )
+                }
+                return true
+            }
+            "RIGHT" -> {
+                if (!currentLane.canMoveRight) {
+                    val msg = "BLOCKED RIGHT: Player is already in RIGHT column (+1)! Can move up to 2 LEFT."
+                    _screenVisionState.update {
+                        it.copy(
+                            blockedBoundaryMoveMessage = msg,
+                            lastAutopilotDecision = msg
+                        )
+                    }
+                    _lastActionLabel.value = "BLOCKED (AT RIGHT)"
+                    return false
+                }
+                val nextLane = RunnerLane.fromColumnIndex(currentLane.columnIndex + 1)
+                _screenVisionState.update {
+                    it.copy(
+                        currentLane = nextLane,
+                        detectedPlayerLane = nextLane,
+                        blockedBoundaryMoveMessage = null,
+                        lastAutopilotDecision = "Moved RIGHT: ${currentLane.shortCode} → ${nextLane.shortCode} " +
+                            "(Rem: ${nextLane.remainingStepsLeft}L, ${nextLane.remainingStepsRight}R)"
+                    )
+                }
+                return true
+            }
+            "UP", "DOWN", "DOUBLE_TAP" -> {
+                _screenVisionState.update {
+                    it.copy(
+                        blockedBoundaryMoveMessage = null,
+                        lastAutopilotDecision = "${mapDirectionToGameAction(normalized)} in ${currentLane.label}"
+                    )
+                }
+                return true
+            }
+            else -> return false
+        }
+    }
+
+    fun setAutopilotEnabled(enabled: Boolean) {
+        _screenVisionState.update {
+            it.copy(
+                isAutopilotEnabled = enabled,
+                isScreenReaderActive = enabled,
+                lastAutopilotDecision = if (enabled) {
+                    "Display Reader Autopilot ACTIVE in ${it.currentLane.label}"
+                } else {
+                    "Display Reader Autopilot Paused"
+                }
+            )
+        }
+    }
+
+    /**
+     * Updates telemetry from the live Screen Display Reader (analyzing the 3 columns on screen)
+     * and computes the optimal automated action (`LEFT`, `RIGHT`, `UP`, or `DOWN`) when an obstacle
+     * approaches in the player's current column.
+     */
+    fun updateScreenVisionReadingAndDecideAction(
+        leftHazard: Float,
+        middleHazard: Float,
+        rightHazard: Float,
+        detectedPlayerColumn: RunnerLane? = null,
+        obstacleType: String = "TRAIN"
+    ): String? {
+        val prev = _screenVisionState.value
+        val activeLane = detectedPlayerColumn ?: prev.currentLane
+
+        val currentLaneHazard = when (activeLane) {
+            RunnerLane.LEFT -> leftHazard
+            RunnerLane.MIDDLE -> middleHazard
+            RunnerLane.RIGHT -> rightHazard
+        }
+
+        // Danger threshold: when obstacle in the player's current column is close (>= 0.62f)
+        var recommendedDirection: String? = null
+        var decisionSummary = "Scanning Display (${activeLane.shortCode}) — Track Clear"
+
+        if (currentLaneHazard >= 0.62f) {
+            when (activeLane) {
+                RunnerLane.MIDDLE -> {
+                    // In Middle column (0): can go 1 Left or 1 Right. Pick the clearer column, or Jump/Roll!
+                    recommendedDirection = when {
+                        leftHazard < 0.38f && leftHazard <= rightHazard -> "LEFT"
+                        rightHazard < 0.38f -> "RIGHT"
+                        obstacleType == "LOW_BARRIER" -> "UP"
+                        obstacleType == "HIGH_BARRIER" -> "DOWN"
+                        else -> "UP"
+                    }
+                }
+                RunnerLane.LEFT -> {
+                    // In Left column (-1): NEVER swipe LEFT again! Move RIGHT to Middle (or Jump/Roll)
+                    recommendedDirection = when {
+                        middleHazard < 0.40f -> "RIGHT"
+                        obstacleType == "HIGH_BARRIER" -> "DOWN"
+                        else -> "UP"
+                    }
+                }
+                RunnerLane.RIGHT -> {
+                    // In Right column (+1): NEVER swipe RIGHT again! Move LEFT to Middle (or Jump/Roll)
+                    recommendedDirection = when {
+                        middleHazard < 0.40f -> "LEFT"
+                        obstacleType == "HIGH_BARRIER" -> "DOWN"
+                        else -> "UP"
+                    }
+                }
+            }
+            decisionSummary =
+                "Obstacle ($obstacleType ${(currentLaneHazard * 100).toInt()}%) in ${activeLane.shortCode} → Auto $recommendedDirection"
+        }
+
+        _screenVisionState.value = prev.copy(
+            currentLane = activeLane,
+            detectedPlayerLane = activeLane,
+            leftLaneHazard = leftHazard.coerceIn(0f, 1f),
+            middleLaneHazard = middleHazard.coerceIn(0f, 1f),
+            rightLaneHazard = rightHazard.coerceIn(0f, 1f),
+            obstacleTypeInCurrentLane = if (currentLaneHazard >= 0.62f) obstacleType else "CLEAR",
+            lastAutopilotDecision = decisionSummary,
+            framesAnalyzedCount = prev.framesAnalyzedCount + 1
+        )
+
+        return recommendedDirection
+    }
+
     fun setMovementInputMode(mode: MovementInputMode) {
         _movementInputMode.value = mode
     }
 
     fun setMovementTrackingActive(active: Boolean) {
         _isMovementTrackingActive.value = active
+        if ( _movementInputMode.value == MovementInputMode.SCREEN_VISION_AUTOPILOT) {
+            setAutopilotEnabled(active)
+        }
     }
 
     fun updatePoseModelStatus(status: String) {
@@ -142,17 +337,6 @@ object SwipeTelemetryRepository {
         calibratePoseCenter(current.currentX, current.currentY)
     }
 
-    /**
-     * Evaluates normalized nose & shoulder coordinates against the calibrated center point using:
-     * 1. WAITING_FOR_NEUTRAL state machine: Once a horizontal swipe (LEFT/RIGHT) fires, horizontal
-     *    swipes are locked in [AxisLockState.WAITING_FOR_NEUTRAL] until the body returns inside the
-     *    center Neutral Box (`|dx| < thresholdX`) for at least `neutralHoldRequiredMs` (100ms).
-     *    Same per-axis neutral return protection applies to vertical (UP/DOWN) so returning from a
-     *    jump doesn't accidentally trigger a roll.
-     * 2. Jump-Cancel Support: Vertical triggers (UP/DOWN) evaluate independently and can fire
-     *    immediately even while horizontal movement is locked in [AxisLockState.WAITING_FOR_NEUTRAL]
-     *    or horizontal 250ms debounce cooldown, allowing players to jump/roll mid-lane-change.
-     */
     fun processPoseLandmarksAndEvaluateDirection(
         noseX: Float,
         noseY: Float,
@@ -199,7 +383,6 @@ object SwipeTelemetryRepository {
         val isInsideHorizontalNeutral = abs(dx) < threshX
         val isInsideVerticalNeutral = abs(dy) < threshY
 
-        // 1. Update Horizontal State Machine (READY vs WAITING_FOR_NEUTRAL with 100ms Neutral Box hold)
         var nextHorizontalState = currentState.horizontalState
         var nextHorizNeutralProgress = currentState.horizontalNeutralProgressMs
 
@@ -217,7 +400,6 @@ object SwipeTelemetryRepository {
                     nextHorizNeutralProgress = elapsedInNeutral
                 }
             } else {
-                // Left the Neutral Box before completing 100ms hold -> reset timer
                 horizontalNeutralEnteredAtMs = null
                 nextHorizNeutralProgress = 0L
             }
@@ -225,7 +407,6 @@ object SwipeTelemetryRepository {
             nextHorizNeutralProgress = requiredNeutralMs
         }
 
-        // 2. Update Vertical State Machine (READY vs WAITING_FOR_NEUTRAL with 100ms Neutral Box hold)
         var nextVerticalState = currentState.verticalState
         var nextVertNeutralProgress = currentState.verticalNeutralProgressMs
 
@@ -250,10 +431,18 @@ object SwipeTelemetryRepository {
             nextVertNeutralProgress = requiredNeutralMs
         }
 
-        // 3. Evaluate Candidate Triggers on Each Axis
         val canFireVertical = nextVerticalState == AxisLockState.READY &&
             !isInsideVerticalNeutral &&
             (nowMs - lastVerticalTriggerMs >= debounceMs)
+
+        // Check 3-Column boundary before allowing a horizontal candidate to fire!
+        val candidateHorizDir = if (dx > 0f) "RIGHT" else "LEFT"
+        val currentLane = _screenVisionState.value.currentLane
+        val isAllowedByColumnBounds = when (candidateHorizDir) {
+            "LEFT" -> currentLane.canMoveLeft
+            "RIGHT" -> currentLane.canMoveRight
+            else -> true
+        }
 
         val canFireHorizontal = nextHorizontalState == AxisLockState.READY &&
             !isInsideHorizontalNeutral &&
@@ -262,8 +451,7 @@ object SwipeTelemetryRepository {
         var detectedDirection: String? = null
         var didJumpCancel = false
 
-        if (canFireVertical && canFireHorizontal) {
-            // Both axes are ready and exceeded threshold simultaneously: pick dominant normalized ratio
+        if (canFireVertical && canFireHorizontal && isAllowedByColumnBounds) {
             if (abs(dy) / threshY >= abs(dx) / threshX) {
                 detectedDirection = if (dy < 0f) "UP" else "DOWN"
                 lastVerticalTriggerMs = nowMs
@@ -271,28 +459,35 @@ object SwipeTelemetryRepository {
                 verticalNeutralEnteredAtMs = null
                 nextVertNeutralProgress = 0L
             } else {
-                detectedDirection = if (dx > 0f) "RIGHT" else "LEFT"
+                detectedDirection = candidateHorizDir
                 lastHorizontalTriggerMs = nowMs
                 nextHorizontalState = AxisLockState.WAITING_FOR_NEUTRAL
                 horizontalNeutralEnteredAtMs = null
                 nextHorizNeutralProgress = 0L
             }
         } else if (canFireVertical) {
-            // Jump-Cancel Support: Vertical (UP/DOWN) fires immediately even if Horizontal is locked
-            // in WAITING_FOR_NEUTRAL or horizontal 250ms cooldown!
             detectedDirection = if (dy < 0f) "UP" else "DOWN"
             didJumpCancel = nextHorizontalState == AxisLockState.WAITING_FOR_NEUTRAL ||
-                (nowMs - lastHorizontalTriggerMs < debounceMs)
+                (nowMs - lastHorizontalTriggerMs < debounceMs) ||
+                !isAllowedByColumnBounds
             lastVerticalTriggerMs = nowMs
             nextVerticalState = AxisLockState.WAITING_FOR_NEUTRAL
             verticalNeutralEnteredAtMs = null
             nextVertNeutralProgress = 0L
         } else if (canFireHorizontal) {
-            detectedDirection = if (dx > 0f) "RIGHT" else "LEFT"
-            lastHorizontalTriggerMs = nowMs
-            nextHorizontalState = AxisLockState.WAITING_FOR_NEUTRAL
-            horizontalNeutralEnteredAtMs = null
-            nextHorizNeutralProgress = 0L
+            if (isAllowedByColumnBounds) {
+                detectedDirection = candidateHorizDir
+                lastHorizontalTriggerMs = nowMs
+                nextHorizontalState = AxisLockState.WAITING_FOR_NEUTRAL
+                horizontalNeutralEnteredAtMs = null
+                nextHorizNeutralProgress = 0L
+            } else {
+                // Record boundary block message so user sees why extra LEFT or RIGHT was suppressed
+                validateAndAdvanceColumnForSwipe(candidateHorizDir, "Pose/Motion Boundary Guard")
+                nextHorizontalState = AxisLockState.WAITING_FOR_NEUTRAL
+                horizontalNeutralEnteredAtMs = null
+                nextHorizNeutralProgress = 0L
+            }
         }
 
         _poseCalibrationState.value = currentState.copy(
@@ -383,7 +578,8 @@ object SwipeTelemetryRepository {
             isDoubleTap = normalizedDir == "DOUBLE_TAP"
         )
         _latestDispatchedDirection.value = normalizedDir to now
-        _lastActionLabel.value = mapDirectionToGameAction(normalizedDir)
+        val laneShort = _screenVisionState.value.currentLane.shortCode
+        _lastActionLabel.value = "${mapDirectionToGameAction(normalizedDir)} • $laneShort"
 
         val event = GestureTelemetryEvent(
             id = eventIdCounter.getAndIncrement(),
@@ -395,7 +591,7 @@ object SwipeTelemetryRepository {
             endY = endY.toInt(),
             durationMs = durationMs,
             dispatchedViaService = dispatchedViaService,
-            statusMessage = statusMessage,
+            statusMessage = "$statusMessage [Lane: ${_screenVisionState.value.currentLane.label}]",
             source = source
         )
         _telemetryLogs.update { current ->
@@ -406,7 +602,7 @@ object SwipeTelemetryRepository {
     fun clearLogs() {
         _telemetryLogs.value = emptyList()
         _autoJumpTotalCount.value = 0
-        _lastActionLabel.value = "READY"
+        resetLaneToMiddle()
         lastHorizontalTriggerMs = -10_000L
         lastVerticalTriggerMs = -10_000L
         horizontalNeutralEnteredAtMs = null

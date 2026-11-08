@@ -185,6 +185,24 @@ fun SwipeControllerScreen(
                         }
 
                         item {
+                            com.example.feature.swipe.presentation.components.ThreeColumnAutopilotCard(
+                                visionState = uiState.screenVisionState,
+                                onToggleAutopilot = {
+                                    viewModel.toggleDisplayAutopilot()
+                                },
+                                onResetToMiddle = {
+                                    viewModel.resetPlayerColumnToMiddle()
+                                },
+                                onStepColumn = { dir ->
+                                    viewModel.triggerSwipe(dir, "3-Column Tracker")
+                                },
+                                onSimulateObstacleScan = {
+                                    viewModel.simulateDisplayObstacleScanAndEvade()
+                                }
+                            )
+                        }
+
+                        item {
                             TranslucentOverlayServiceCard(
                                 isOverlayServiceRunning = uiState.isApplicationOverlayRunning,
                                 canDrawOverlays = uiState.canDrawOverlays,

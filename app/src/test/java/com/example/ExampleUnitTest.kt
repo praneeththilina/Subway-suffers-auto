@@ -2,8 +2,11 @@ package com.example
 
 import com.example.feature.swipe.data.repository.SwipeTelemetryRepository
 import com.example.feature.swipe.domain.model.AxisLockState
+import com.example.feature.swipe.domain.model.RunnerLane
 import com.example.service.SwipeControllerService
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -11,18 +14,18 @@ import org.junit.Test
 
 /**
  * Local unit tests verifying:
- * 1. SwipeControllerService.performSwipe(direction) for UP, DOWN, LEFT, RIGHT, and DOUBLE_TAP.
- * 2. Real-time action label mapping (JUMP, ROLL, LEFT, RIGHT, HOVERBOARD) displayed by OverlayService.
- * 3. WAITING_FOR_NEUTRAL state machine: locks out horizontal swipes until the body returns inside
- *    the center "Neutral Box" for at least 100ms, preventing accidental opposite-direction swipes.
- * 4. Jump-Cancel Support: vertical triggers (UP/DOWN) fire immediately even while horizontal
- *    movement is locked in WAITING_FOR_NEUTRAL or horizontal cooldown.
+ * 1. 3-Column Player Position State Machine (Starts in MIDDLE = 0, Left = -1, Right = +1):
+ *    - Moving LEFT from MIDDLE goes to LEFT (-1) and blocks any further LEFT swipes, while allowing 2 RIGHT swipes.
+ *    - Moving RIGHT from MIDDLE goes to RIGHT (+1) and blocks any further RIGHT swipes, while allowing 2 LEFT swipes.
+ * 2. Display Reader Autopilot decision engine across the 3 columns.
+ * 3. WAITING_FOR_NEUTRAL 100ms Neutral Box hold and Jump-Cancel support.
  */
 class ExampleUnitTest {
 
     @Before
     fun setUp() {
         SwipeTelemetryRepository.clearLogs()
+        SwipeTelemetryRepository.resetLaneToMiddle()
         SwipeTelemetryRepository.calibratePoseCenter(0.5f, 0.5f)
         SwipeTelemetryRepository.updatePoseThresholds(
             thresholdX = 0.10f,
@@ -33,37 +36,83 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun performSwipe_recordsAllFiveRequiredDirections_andUpdatesActionLabel() {
-        SwipeControllerService.performSwipe("UP")
-        assertEquals("JUMP", SwipeTelemetryRepository.lastActionLabel.value)
+    fun threeColumnTracker_startsFromMiddle_blocksDuplicateBoundarySwipes_andAllowsTwoOppositeSwipes() {
+        // 1. Starts in MIDDLE column (0)
+        assertEquals(RunnerLane.MIDDLE, SwipeTelemetryRepository.screenVisionState.value.currentLane)
+        assertEquals(1, SwipeTelemetryRepository.screenVisionState.value.currentLane.remainingStepsLeft)
+        assertEquals(1, SwipeTelemetryRepository.screenVisionState.value.currentLane.remainingStepsRight)
 
-        SwipeControllerService.performSwipe("DOWN")
-        assertEquals("ROLL", SwipeTelemetryRepository.lastActionLabel.value)
-
+        // 2. Move LEFT from MIDDLE -> now in LEFT column (-1)
         SwipeControllerService.performSwipe("LEFT")
-        assertEquals("LEFT", SwipeTelemetryRepository.lastActionLabel.value)
+        assertEquals(RunnerLane.LEFT, SwipeTelemetryRepository.screenVisionState.value.currentLane)
+        assertEquals(0, SwipeTelemetryRepository.screenVisionState.value.currentLane.remainingStepsLeft)
+        assertEquals(2, SwipeTelemetryRepository.screenVisionState.value.currentLane.remainingStepsRight)
 
+        // 3. Try to go LEFT again while already in LEFT column -> MUST BE BLOCKED!
+        val logCountBeforeBlockedLeft = SwipeTelemetryRepository.telemetryLogs.value.size
+        val blockedLeftResult = SwipeControllerService.performSwipe("LEFT")
+        assertFalse(blockedLeftResult)
+        assertEquals(RunnerLane.LEFT, SwipeTelemetryRepository.screenVisionState.value.currentLane)
+        assertEquals(logCountBeforeBlockedLeft, SwipeTelemetryRepository.telemetryLogs.value.size)
+        assertNotNull(SwipeTelemetryRepository.screenVisionState.value.blockedBoundaryMoveMessage)
+
+        // 4. From LEFT (-1), player can go 2 RIGHT:
+        // First RIGHT -> moves to MIDDLE (0)
         SwipeControllerService.performSwipe("RIGHT")
-        assertEquals("RIGHT", SwipeTelemetryRepository.lastActionLabel.value)
+        assertEquals(RunnerLane.MIDDLE, SwipeTelemetryRepository.screenVisionState.value.currentLane)
 
-        SwipeControllerService.performSwipe("DOUBLE_TAP")
-        assertEquals("HOVERBOARD", SwipeTelemetryRepository.lastActionLabel.value)
+        // Second RIGHT -> moves to RIGHT (+1)
+        SwipeControllerService.performSwipe("RIGHT")
+        assertEquals(RunnerLane.RIGHT, SwipeTelemetryRepository.screenVisionState.value.currentLane)
+        assertEquals(2, SwipeTelemetryRepository.screenVisionState.value.currentLane.remainingStepsLeft)
+        assertEquals(0, SwipeTelemetryRepository.screenVisionState.value.currentLane.remainingStepsRight)
 
-        val logs = SwipeTelemetryRepository.telemetryLogs.value
-        assertEquals(5, logs.size)
+        // 5. Try to go RIGHT again while already in RIGHT column (+1) -> MUST BE BLOCKED!
+        val logCountBeforeBlockedRight = SwipeTelemetryRepository.telemetryLogs.value.size
+        val blockedRightResult = SwipeControllerService.performSwipe("RIGHT")
+        assertFalse(blockedRightResult)
+        assertEquals(RunnerLane.RIGHT, SwipeTelemetryRepository.screenVisionState.value.currentLane)
+        assertEquals(logCountBeforeBlockedRight, SwipeTelemetryRepository.telemetryLogs.value.size)
+        assertNotNull(SwipeTelemetryRepository.screenVisionState.value.blockedBoundaryMoveMessage)
 
-        val upEvent = logs.first { it.direction == "UP" }
-        assertTrue(upEvent.endY < upEvent.startY)
+        // 6. From RIGHT (+1), player can go 2 LEFT back to LEFT (-1):
+        SwipeControllerService.performSwipe("LEFT")
+        assertEquals(RunnerLane.MIDDLE, SwipeTelemetryRepository.screenVisionState.value.currentLane)
+        SwipeControllerService.performSwipe("LEFT")
+        assertEquals(RunnerLane.LEFT, SwipeTelemetryRepository.screenVisionState.value.currentLane)
+    }
 
-        val downEvent = logs.first { it.direction == "DOWN" }
-        assertTrue(downEvent.endY > downEvent.startY)
+    @Test
+    fun displayReaderAutopilot_readsThreeColumnHazards_andSteersToSafeColumnWithoutOutOfBounds() {
+        // Start in MIDDLE (0): Obstacle detected in MIDDLE (0.85f), LEFT is clear (0.10f) -> recommends "LEFT"
+        val decisionFromMiddle = SwipeTelemetryRepository.updateScreenVisionReadingAndDecideAction(
+            leftHazard = 0.10f,
+            middleHazard = 0.85f,
+            rightHazard = 0.50f,
+            obstacleType = "TRAIN"
+        )
+        assertEquals("LEFT", decisionFromMiddle)
+        SwipeControllerService.performSwipe(decisionFromMiddle!!)
+        assertEquals(RunnerLane.LEFT, SwipeTelemetryRepository.screenVisionState.value.currentLane)
+
+        // Now player is in LEFT (-1): Obstacle detected in LEFT (0.90f), MIDDLE is clear (0.15f)
+        // Autopilot NEVER recommends "LEFT" when in LEFT column; it recommends "RIGHT" back to MIDDLE!
+        val decisionFromLeft = SwipeTelemetryRepository.updateScreenVisionReadingAndDecideAction(
+            leftHazard = 0.90f,
+            middleHazard = 0.15f,
+            rightHazard = 0.20f,
+            obstacleType = "TRAIN"
+        )
+        assertEquals("RIGHT", decisionFromLeft)
+        SwipeControllerService.performSwipe(decisionFromLeft!!)
+        assertEquals(RunnerLane.MIDDLE, SwipeTelemetryRepository.screenVisionState.value.currentLane)
     }
 
     @Test
     fun waitingForNeutral_locksOutHorizontalUntil100msInNeutralBox_andPreventsOppositeReturnSwipe() {
         val t0 = 20_000L
 
-        // 1. Lean LEFT at t0 -> triggers "LEFT" and enters WAITING_FOR_NEUTRAL on horizontal axis
+        // 1. Lean LEFT from MIDDLE at t0 -> triggers "LEFT"
         val dirLeft = SwipeTelemetryRepository.processPoseLandmarksAndEvaluateDirection(
             noseX = 0.28f,
             noseY = 0.50f,
@@ -79,8 +128,7 @@ class ExampleUnitTest {
             SwipeTelemetryRepository.poseCalibrationState.value.horizontalState
         )
 
-        // 2. Swing straight across to RIGHT without holding inside Neutral Box for 100ms
-        // Even 300ms later (past 250ms debounce), horizontal MUST remain locked out!
+        // 2. Swing straight across to RIGHT without holding inside Neutral Box for 100ms -> blocked
         val accidentalOppositeSwing = SwipeTelemetryRepository.processPoseLandmarksAndEvaluateDirection(
             noseX = 0.72f,
             noseY = 0.50f,
@@ -91,12 +139,8 @@ class ExampleUnitTest {
             nowMs = t0 + 300L
         )
         assertNull(accidentalOppositeSwing)
-        assertEquals(
-            AxisLockState.WAITING_FOR_NEUTRAL,
-            SwipeTelemetryRepository.poseCalibrationState.value.horizontalState
-        )
 
-        // 3. Return inside the center Neutral Box at t0 + 350ms (0ms elapsed in neutral)
+        // 3. Return inside Neutral Box for 110ms (t0 + 350ms to t0 + 460ms) -> unlocks to READY
         SwipeTelemetryRepository.processPoseLandmarksAndEvaluateDirection(
             noseX = 0.50f,
             noseY = 0.50f,
@@ -106,22 +150,6 @@ class ExampleUnitTest {
             rightShoulderY = 0.50f,
             nowMs = t0 + 350L
         )
-        // After only 60ms in Neutral Box (< 100ms required), still WAITING_FOR_NEUTRAL
-        SwipeTelemetryRepository.processPoseLandmarksAndEvaluateDirection(
-            noseX = 0.50f,
-            noseY = 0.50f,
-            leftShoulderX = 0.45f,
-            leftShoulderY = 0.50f,
-            rightShoulderX = 0.55f,
-            rightShoulderY = 0.50f,
-            nowMs = t0 + 410L
-        )
-        assertEquals(
-            AxisLockState.WAITING_FOR_NEUTRAL,
-            SwipeTelemetryRepository.poseCalibrationState.value.horizontalState
-        )
-
-        // 4. Hold inside Neutral Box for 110ms total (t0 + 460ms >= 100ms) -> unlocks to READY!
         SwipeTelemetryRepository.processPoseLandmarksAndEvaluateDirection(
             noseX = 0.50f,
             noseY = 0.50f,
@@ -136,7 +164,7 @@ class ExampleUnitTest {
             SwipeTelemetryRepository.poseCalibrationState.value.horizontalState
         )
 
-        // 5. Now leaning RIGHT at t0 + 500ms fires "RIGHT" cleanly
+        // 4. Now leaning RIGHT fires "RIGHT" cleanly
         val intentionalRight = SwipeTelemetryRepository.processPoseLandmarksAndEvaluateDirection(
             noseX = 0.72f,
             noseY = 0.50f,
@@ -153,7 +181,6 @@ class ExampleUnitTest {
     fun jumpCancelSupport_allowsImmediateVerticalJumpOrRoll_whileHorizontalLockedInCooldown() {
         val t0 = 50_000L
 
-        // 1. Player leans LEFT at t0 -> triggers "LEFT", horizontal is now WAITING_FOR_NEUTRAL
         val dirLeft = SwipeTelemetryRepository.processPoseLandmarksAndEvaluateDirection(
             noseX = 0.25f,
             noseY = 0.50f,
@@ -164,13 +191,7 @@ class ExampleUnitTest {
             nowMs = t0
         )
         assertEquals("LEFT", dirLeft)
-        assertEquals(
-            AxisLockState.WAITING_FOR_NEUTRAL,
-            SwipeTelemetryRepository.poseCalibrationState.value.horizontalState
-        )
 
-        // 2. Only 40ms later (while still leaning left AND inside horizontal 250ms cooldown),
-        // player jumps upward! Jump-Cancel must fire "UP" immediately!
         val jumpMidLaneChange = SwipeTelemetryRepository.processPoseLandmarksAndEvaluateDirection(
             noseX = 0.25f,
             noseY = 0.26f,

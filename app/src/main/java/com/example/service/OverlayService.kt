@@ -428,7 +428,7 @@ class OverlayService : Service(), LifecycleOwner {
         contentRow.addView(camFrame)
         contentRow.addView(rightColumn)
 
-        // Quick Manual Action Bar (JUMP / ROLL / LEFT / RIGHT) for testing directly over the game
+        // Quick Manual Action Bar (JUMP / ROLL / LEFT / RIGHT / RESET MIDDLE) for testing directly over the game
         val quickBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -446,7 +446,7 @@ class OverlayService : Service(), LifecycleOwner {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
-                this.layoutParams = LinearLayout.LayoutParams(dpToPx(34), dpToPx(28)).apply {
+                this.layoutParams = LinearLayout.LayoutParams(dpToPx(32), dpToPx(28)).apply {
                     marginEnd = dpToPx(4)
                 }
                 background = GradientDrawable().apply {
@@ -461,6 +461,25 @@ class OverlayService : Service(), LifecycleOwner {
             }
             quickBar.addView(chip)
         }
+
+        val resetChip = TextView(this).apply {
+            text = "M0"
+            setTextColor(Color.parseColor("#10B981"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            this.layoutParams = LinearLayout.LayoutParams(dpToPx(34), dpToPx(28))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dpToPx(8).toFloat()
+                setColor(Color.parseColor("#88064E3B"))
+                setStroke(dpToPx(1), Color.parseColor("#8810B981"))
+            }
+            setOnClickListener {
+                SwipeTelemetryRepository.resetLaneToMiddle()
+            }
+        }
+        quickBar.addView(resetChip)
 
         rootCard.addView(topHeader)
         rootCard.addView(contentRow)
@@ -612,17 +631,24 @@ class OverlayService : Service(), LifecycleOwner {
         }
 
         serviceScope.launch {
+            SwipeTelemetryRepository.screenVisionState.collectLatest { visionState ->
+                val lane = visionState.currentLane
+                subStatusTextView?.text =
+                    "Col: ${lane.shortCode} (Can: ${lane.remainingStepsLeft}L, ${lane.remainingStepsRight}R)"
+            }
+        }
+
+        serviceScope.launch {
             SwipeTelemetryRepository.poseCalibrationState.collectLatest { poseState ->
                 if (!SwipeTelemetryRepository.isAutoJumpRunning.value &&
                     SwipeTelemetryRepository.isMovementTrackingActive.value
                 ) {
+                    val lane = SwipeTelemetryRepository.screenVisionState.value.currentLane
                     subStatusTextView?.text = when {
-                        poseState.jumpCancelActive -> "⚡ JUMP-CANCEL!"
+                        poseState.jumpCancelActive -> "⚡ JUMP-CANCEL (${lane.shortCode})"
                         poseState.horizontalState == com.example.feature.swipe.domain.model.AxisLockState.WAITING_FOR_NEUTRAL ->
-                            "X: WAIT_NEUTRAL (${poseState.horizontalNeutralProgressMs}ms)"
-                        poseState.verticalState == com.example.feature.swipe.domain.model.AxisLockState.WAITING_FOR_NEUTRAL ->
-                            "Y: WAIT_NEUTRAL (${poseState.verticalNeutralProgressMs}ms)"
-                        else -> "NEUTRAL READY"
+                            "WAIT_NEUTRAL • ${lane.shortCode}"
+                        else -> "Col ${lane.shortCode} (${lane.remainingStepsLeft}L/${lane.remainingStepsRight}R)"
                     }
                 }
             }

@@ -39,10 +39,12 @@ data class SwipeControllerUiState(
     val canDrawOverlays: Boolean = false,
     val hasCameraPermission: Boolean = false,
     val isCameraPreviewEnabled: Boolean = true,
-    val movementInputMode: MovementInputMode = MovementInputMode.CAMERA_POSE,
+    val movementInputMode: MovementInputMode = MovementInputMode.SCREEN_VISION_AUTOPILOT,
     val isMovementTrackingActive: Boolean = false,
     val poseCalibrationState: PoseCalibrationState = PoseCalibrationState(),
-    val lastActionLabel: String = "READY",
+    val screenVisionState: com.example.feature.swipe.domain.model.ScreenVisionAutopilotState =
+        com.example.feature.swipe.domain.model.ScreenVisionAutopilotState(),
+    val lastActionLabel: String = "READY (MIDDLE)",
     val isAutoJumpRunning: Boolean = false,
     val autoJumpCountdownMs: Long = 3000L,
     val autoJumpTotalCount: Int = 0,
@@ -78,6 +80,7 @@ class SwipeControllerViewModel(
         SwipeTelemetryRepository.movementInputMode,
         SwipeTelemetryRepository.isMovementTrackingActive,
         SwipeTelemetryRepository.poseCalibrationState,
+        SwipeTelemetryRepository.screenVisionState,
         SwipeTelemetryRepository.lastActionLabel,
         SwipeTelemetryRepository.isAutoJumpRunning,
         SwipeTelemetryRepository.autoJumpCountdownMs,
@@ -101,17 +104,18 @@ class SwipeControllerViewModel(
             movementInputMode = values[6] as MovementInputMode,
             isMovementTrackingActive = values[7] as Boolean,
             poseCalibrationState = values[8] as PoseCalibrationState,
-            lastActionLabel = values[9] as String,
-            isAutoJumpRunning = values[10] as Boolean,
-            autoJumpCountdownMs = values[11] as Long,
-            autoJumpTotalCount = values[12] as Int,
-            tuningConfig = values[13] as SwipeTuningConfig,
-            telemetryLogs = values[14] as List<GestureTelemetryEvent>,
-            latestGestureStroke = values[15] as GestureStrokePoint?,
-            latestDispatchedDirection = values[16] as Pair<String, Long>?,
-            isInAppFloatingFabVisible = values[17] as Boolean,
-            isRunnerSandboxOpen = values[18] as Boolean,
-            statusBannerMessage = values[19] as String?
+            screenVisionState = values[9] as com.example.feature.swipe.domain.model.ScreenVisionAutopilotState,
+            lastActionLabel = values[10] as String,
+            isAutoJumpRunning = values[11] as Boolean,
+            autoJumpCountdownMs = values[12] as Long,
+            autoJumpTotalCount = values[13] as Int,
+            tuningConfig = values[14] as SwipeTuningConfig,
+            telemetryLogs = values[15] as List<GestureTelemetryEvent>,
+            latestGestureStroke = values[16] as GestureStrokePoint?,
+            latestDispatchedDirection = values[17] as Pair<String, Long>?,
+            isInAppFloatingFabVisible = values[18] as Boolean,
+            isRunnerSandboxOpen = values[19] as Boolean,
+            statusBannerMessage = values[20] as String?
         )
     }.stateIn(
         scope = viewModelScope,
@@ -264,15 +268,62 @@ class SwipeControllerViewModel(
         SwipeTelemetryRepository.setCameraPreviewEnabledInOverlay(next)
     }
 
+    fun toggleDisplayAutopilot() {
+        val next = !SwipeTelemetryRepository.screenVisionState.value.isAutopilotEnabled
+        SwipeTelemetryRepository.setAutopilotEnabled(next)
+        if (SwipeControllerService.isServiceActive()) {
+            performSwipeUseCase.setAutoJumpActive(next)
+        }
+        _statusBannerMessage.value = if (next) {
+            "Display Reader Autopilot ACTIVE! Reading 3 columns (Starts at MIDDLE = 0) and automating obstacle evasion."
+        } else {
+            "Display Reader Autopilot paused."
+        }
+    }
+
+    fun resetPlayerColumnToMiddle() {
+        SwipeTelemetryRepository.resetLaneToMiddle()
+        _statusBannerMessage.value =
+            "Reset player position to MIDDLE column (0) — can move 1 Left or 1 Right."
+    }
+
+    fun simulateDisplayObstacleScanAndEvade() {
+        val currentLane = SwipeTelemetryRepository.screenVisionState.value.currentLane
+        val (leftH, midH, rightH) = when (currentLane) {
+            com.example.feature.swipe.domain.model.RunnerLane.MIDDLE -> Triple(0.10f, 0.88f, 0.45f)
+            com.example.feature.swipe.domain.model.RunnerLane.LEFT -> Triple(0.90f, 0.12f, 0.25f)
+            com.example.feature.swipe.domain.model.RunnerLane.RIGHT -> Triple(0.25f, 0.12f, 0.90f)
+        }
+        val recommendedDir = SwipeTelemetryRepository.updateScreenVisionReadingAndDecideAction(
+            leftHazard = leftH,
+            middleHazard = midH,
+            rightHazard = rightH,
+            detectedPlayerColumn = null,
+            obstacleType = "TRAIN"
+        )
+        if (recommendedDir != null) {
+            performSwipeUseCase(recommendedDir, "Display Reader Autopilot")
+            val newLane = SwipeTelemetryRepository.screenVisionState.value.currentLane
+            _statusBannerMessage.value =
+                "Display Reader detected TRAIN in ${currentLane.shortCode} → Dispatched $recommendedDir to ${newLane.shortCode}!"
+        }
+    }
+
     fun triggerSwipe(direction: String, source: String = "Manual Control Pad") {
+        val beforeLane = SwipeTelemetryRepository.screenVisionState.value.currentLane
         val dispatched = performSwipeUseCase(direction, source)
+        val afterVision = SwipeTelemetryRepository.screenVisionState.value
+        if (afterVision.blockedBoundaryMoveMessage != null) {
+            _statusBannerMessage.value = afterVision.blockedBoundaryMoveMessage
+            return
+        }
         val actionName = SwipeTelemetryRepository.mapDirectionToGameAction(direction)
         if (!dispatched && !SwipeControllerService.isServiceActive()) {
             _statusBannerMessage.value =
-                "Action '$actionName' ($direction) simulated in-app. Enable SwipeController in Accessibility Settings for cross-app OS gestures."
+                "Action '$actionName' (${beforeLane.shortCode} → ${afterVision.currentLane.shortCode}). Enable Accessibility Service for cross-app OS dispatch."
         } else {
             _statusBannerMessage.value =
-                "Triggered $actionName via performSwipe(\"$direction\")."
+                "Triggered $actionName (${beforeLane.shortCode} → ${afterVision.currentLane.shortCode})."
         }
     }
 
