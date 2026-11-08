@@ -9,7 +9,8 @@ import org.junit.Test
 
 /**
  * Local unit tests verifying SwipeControllerService.performSwipe(direction)
- * for UP, DOWN, LEFT, RIGHT, and DOUBLE_TAP gestures.
+ * for UP, DOWN, LEFT, RIGHT, and DOUBLE_TAP gestures and real-time action label mapping
+ * (JUMP, ROLL, LEFT, RIGHT, HOVERBOARD) displayed by OverlayService.
  */
 class ExampleUnitTest {
 
@@ -19,19 +20,24 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun performSwipe_recordsAllFiveRequiredDirections() {
-        val directions = listOf("UP", "DOWN", "LEFT", "RIGHT", "DOUBLE_TAP")
-        directions.forEach { dir ->
-            SwipeControllerService.performSwipe(dir)
-        }
+    fun performSwipe_recordsAllFiveRequiredDirections_andUpdatesActionLabel() {
+        SwipeControllerService.performSwipe("UP")
+        assertEquals("JUMP", SwipeTelemetryRepository.lastActionLabel.value)
+
+        SwipeControllerService.performSwipe("DOWN")
+        assertEquals("ROLL", SwipeTelemetryRepository.lastActionLabel.value)
+
+        SwipeControllerService.performSwipe("LEFT")
+        assertEquals("LEFT", SwipeTelemetryRepository.lastActionLabel.value)
+
+        SwipeControllerService.performSwipe("RIGHT")
+        assertEquals("RIGHT", SwipeTelemetryRepository.lastActionLabel.value)
+
+        SwipeControllerService.performSwipe("DOUBLE_TAP")
+        assertEquals("HOVERBOARD", SwipeTelemetryRepository.lastActionLabel.value)
 
         val logs = SwipeTelemetryRepository.telemetryLogs.value
         assertEquals(5, logs.size)
-        assertEquals("DOUBLE_TAP", logs[0].direction)
-        assertEquals("RIGHT", logs[1].direction)
-        assertEquals("LEFT", logs[2].direction)
-        assertEquals("DOWN", logs[3].direction)
-        assertEquals("UP", logs[4].direction)
 
         // Verify UP swipe moves upward on screen (endY < startY)
         val upEvent = logs.first { it.direction == "UP" }

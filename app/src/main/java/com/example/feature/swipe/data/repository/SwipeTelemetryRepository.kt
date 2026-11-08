@@ -18,6 +18,12 @@ object SwipeTelemetryRepository {
     private val _isFloatingOverlayVisible = MutableStateFlow(false)
     val isFloatingOverlayVisible: StateFlow<Boolean> = _isFloatingOverlayVisible.asStateFlow()
 
+    private val _isApplicationOverlayRunning = MutableStateFlow(false)
+    val isApplicationOverlayRunning: StateFlow<Boolean> = _isApplicationOverlayRunning.asStateFlow()
+
+    private val _isCameraPreviewEnabledInOverlay = MutableStateFlow(true)
+    val isCameraPreviewEnabledInOverlay: StateFlow<Boolean> = _isCameraPreviewEnabledInOverlay.asStateFlow()
+
     private val _isAutoJumpRunning = MutableStateFlow(false)
     val isAutoJumpRunning: StateFlow<Boolean> = _isAutoJumpRunning.asStateFlow()
 
@@ -39,6 +45,20 @@ object SwipeTelemetryRepository {
     private val _latestDispatchedDirection = MutableStateFlow<Pair<String, Long>?>(null)
     val latestDispatchedDirection: StateFlow<Pair<String, Long>?> = _latestDispatchedDirection.asStateFlow()
 
+    private val _lastActionLabel = MutableStateFlow("READY")
+    val lastActionLabel: StateFlow<String> = _lastActionLabel.asStateFlow()
+
+    fun mapDirectionToGameAction(direction: String): String {
+        return when (direction.trim().uppercase()) {
+            "UP" -> "JUMP"
+            "DOWN" -> "ROLL"
+            "LEFT" -> "LEFT"
+            "RIGHT" -> "RIGHT"
+            "DOUBLE_TAP" -> "HOVERBOARD"
+            else -> direction.trim().uppercase()
+        }
+    }
+
     fun setServiceConnected(connected: Boolean) {
         _isServiceConnected.value = connected
         if (!connected) {
@@ -49,6 +69,14 @@ object SwipeTelemetryRepository {
 
     fun setFloatingOverlayVisible(visible: Boolean) {
         _isFloatingOverlayVisible.value = visible
+    }
+
+    fun setApplicationOverlayRunning(running: Boolean) {
+        _isApplicationOverlayRunning.value = running
+    }
+
+    fun setCameraPreviewEnabledInOverlay(enabled: Boolean) {
+        _isCameraPreviewEnabledInOverlay.value = enabled
     }
 
     fun setAutoJumpRunning(running: Boolean) {
@@ -100,6 +128,7 @@ object SwipeTelemetryRepository {
             isDoubleTap = normalizedDir == "DOUBLE_TAP"
         )
         _latestDispatchedDirection.value = normalizedDir to now
+        _lastActionLabel.value = mapDirectionToGameAction(normalizedDir)
 
         val event = GestureTelemetryEvent(
             id = eventIdCounter.getAndIncrement(),
@@ -122,5 +151,6 @@ object SwipeTelemetryRepository {
     fun clearLogs() {
         _telemetryLogs.value = emptyList()
         _autoJumpTotalCount.value = 0
+        _lastActionLabel.value = "READY"
     }
 }

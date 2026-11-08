@@ -1,5 +1,9 @@
 package com.example.feature.swipe.presentation
 
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -32,6 +36,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RocketLaunch
@@ -39,6 +44,7 @@ import androidx.compose.material.icons.filled.SettingsAccessibility
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -99,10 +105,22 @@ fun SwipeControllerScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { granted ->
+            viewModel.onCameraPermissionResult(granted)
+        }
+    )
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { /* Optional notification permission for foreground service */ }
+    )
+
     DisposableEffect(lifecycleOwner, context) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                viewModel.refreshAccessibilityStatus(context)
+                viewModel.refreshPermissionsAndStatus(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -149,7 +167,7 @@ fun SwipeControllerScreen(
                             start = 16.dp,
                             end = 16.dp,
                             top = 12.dp,
-                            bottom = 128.dp
+                            bottom = 148.dp
                         ),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
@@ -161,7 +179,32 @@ fun SwipeControllerScreen(
                                     viewModel.openAccessibilitySettings(context)
                                 },
                                 onRefreshStatus = {
-                                    viewModel.refreshAccessibilityStatus(context)
+                                    viewModel.refreshPermissionsAndStatus(context)
+                                }
+                            )
+                        }
+
+                        item {
+                            TranslucentOverlayServiceCard(
+                                isOverlayServiceRunning = uiState.isApplicationOverlayRunning,
+                                canDrawOverlays = uiState.canDrawOverlays,
+                                hasCameraPermission = uiState.hasCameraPermission,
+                                isCameraPreviewEnabled = uiState.isCameraPreviewEnabled,
+                                lastActionLabel = uiState.lastActionLabel,
+                                onToggleOverlayService = {
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                    viewModel.toggleApplicationOverlayService(context)
+                                },
+                                onGrantOverlayPermission = {
+                                    viewModel.openManageOverlayPermissionSettings(context)
+                                },
+                                onRequestCameraPermission = {
+                                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                },
+                                onToggleCameraPreview = {
+                                    viewModel.toggleCameraPreviewInOverlay()
                                 }
                             )
                         }
@@ -233,22 +276,216 @@ fun SwipeControllerScreen(
                 }
             }
 
-            // Temporary Draggable Floating Button for the Milestone Test
-            // Visible over both the Controller Dashboard and the Subway Runner Sandbox!
+            // Translucent Draggable Control Panel (In-App Preview + Runner Sandbox HUD)
+            // Mirrors OverlayService (Mini Camera Preview + Last Triggered Action JUMP/ROLL/LEFT/RIGHT + Start/Stop)
             DraggableMilestoneFloatingButton(
-                visible = uiState.isInAppFloatingFabVisible,
+                visible = uiState.isInAppFloatingFabVisible && !uiState.isApplicationOverlayRunning,
                 isAutoJumpRunning = uiState.isAutoJumpRunning,
+                isCameraPreviewEnabled = uiState.isCameraPreviewEnabled,
+                lastActionLabel = uiState.lastActionLabel,
                 countdownMs = uiState.autoJumpCountdownMs,
                 jumpCount = uiState.autoJumpTotalCount,
                 onToggleAutoJump = { viewModel.toggleAutoJumpLoop() },
-                onInstantSwipeUp = {
-                    SwipeControllerService.performSwipe(SwipeControllerService.DIRECTION_UP)
+                onToggleCameraPreview = {
+                    if (!uiState.hasCameraPermission) {
+                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                    } else {
+                        viewModel.toggleCameraPreviewInOverlay()
+                    }
+                },
+                onInstantSwipe = { dir ->
+                    viewModel.triggerSwipe(dir, "Floating HUD Chip")
                 },
                 onDismiss = { viewModel.setInAppFloatingFabVisible(false) },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 16.dp, bottom = 16.dp)
             )
+        }
+    }
+}
+
+@Composable
+private fun TranslucentOverlayServiceCard(
+    isOverlayServiceRunning: Boolean,
+    canDrawOverlays: Boolean,
+    hasCameraPermission: Boolean,
+    isCameraPreviewEnabled: Boolean,
+    lastActionLabel: String,
+    onToggleOverlayService: () -> Unit,
+    onGrantOverlayPermission: () -> Unit,
+    onRequestCameraPermission: () -> Unit,
+    onToggleCameraPreview: () -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                width = 1.5.dp,
+                color = if (isOverlayServiceRunning) EmeraldPulse else ElectricCyan.copy(alpha = 0.6f),
+                shape = RoundedCornerShape(20.dp)
+            )
+            .testTag("overlay_service_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                if (isOverlayServiceRunning) EmeraldPulse.copy(alpha = 0.2f)
+                                else ElectricCyan.copy(alpha = 0.15f)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PictureInPictureAlt,
+                            contentDescription = null,
+                            tint = if (isOverlayServiceRunning) EmeraldPulse else ElectricCyan
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = stringResource(R.string.overlay_hud_card_title),
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "TYPE_APPLICATION_OVERLAY • FLAG_NOT_FOCUSABLE",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFamily,
+                            color = ElectricCyan
+                        )
+                    }
+                }
+
+                // Live Last Triggered Action Pill (JUMP, ROLL, LEFT, RIGHT)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .border(1.dp, ElectricCyan.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = lastActionLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = JetBrainsMonoFamily,
+                        color = EmeraldPulse,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Text(
+                text = stringResource(R.string.overlay_hud_card_desc),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            // Permission Status Row (Overlay Permission + Camera Permission)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onGrantOverlayPermission,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("grant_overlay_permission_button")
+                ) {
+                    Icon(
+                        imageVector = if (canDrawOverlays) Icons.Default.CheckCircle else Icons.Default.Layers,
+                        contentDescription = null,
+                        tint = if (canDrawOverlays) EmeraldPulse else AmberWarning,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (canDrawOverlays) "Overlay Ready" else "Allow Overlay",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (canDrawOverlays) EmeraldPulse else AmberWarning,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        if (!hasCameraPermission) {
+                            onRequestCameraPermission()
+                        } else {
+                            onToggleCameraPreview()
+                        }
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("camera_preview_permission_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Videocam,
+                        contentDescription = null,
+                        tint = if (hasCameraPermission && isCameraPreviewEnabled) EmeraldPulse else ElectricCyan,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = when {
+                            !hasCameraPermission -> "Grant Camera"
+                            isCameraPreviewEnabled -> "Cam Preview: ON"
+                            else -> "Cam Preview: OFF"
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (hasCameraPermission && isCameraPreviewEnabled) EmeraldPulse else ElectricCyan,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            // Launch / Stop OverlayService Button
+            Button(
+                onClick = onToggleOverlayService,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isOverlayServiceRunning) KineticCoral else ElectricCyan,
+                    contentColor = if (isOverlayServiceRunning) Color.White else Color(0xFF041318)
+                ),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .testTag("toggle_overlay_service_button")
+            ) {
+                Icon(
+                    imageVector = if (isOverlayServiceRunning) Icons.Default.Stop else Icons.Default.PictureInPictureAlt,
+                    contentDescription = null
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (isOverlayServiceRunning) {
+                        stringResource(R.string.stop_overlay_service)
+                    } else {
+                        stringResource(R.string.start_overlay_service)
+                    },
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
         }
     }
 }
@@ -298,7 +535,6 @@ private fun HeroAccessibilityBannerCard(
                         )
                 )
 
-                // Service Status Badge
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -492,7 +728,6 @@ private fun MilestoneAutoJumpCard(
                     }
                 }
 
-                // Jump Counter Pill
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
@@ -514,7 +749,6 @@ private fun MilestoneAutoJumpCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            // Progress Countdown Bar
             val progressFraction = if (isAutoJumpRunning && intervalMs > 0L) {
                 (autoJumpCountdownMs.toFloat() / intervalMs.toFloat()).coerceIn(0f, 1f)
             } else {
@@ -553,7 +787,6 @@ private fun MilestoneAutoJumpCard(
                 )
             }
 
-            // Primary Action Row: Start/Stop 3s Auto-Jump + Floating Overlay Toggle
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -608,16 +841,15 @@ private fun MilestoneAutoJumpCard(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = if (isServiceConnected) {
-                            if (isFloatingOverlayVisible) "Hide OS Overlay" else "OS Overlay"
+                            if (isFloatingOverlayVisible) "Hide A11y HUD" else "A11y HUD"
                         } else {
-                            if (isInAppFloatingFabVisible) "Hide Float Btn" else "Show Float Btn"
+                            if (isInAppFloatingFabVisible) "Hide HUD Preview" else "Show HUD Preview"
                         },
                         style = MaterialTheme.typography.labelLarge
                     )
                 }
             }
 
-            // Secondary Row: Launch Subway Surfers OR Open Built-In Subway Runner Sandbox
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -705,13 +937,11 @@ private fun ManualGestureDeckCard(
                 )
             }
 
-            // Tactical 5-Button Directional Pad (UP, LEFT, DOUBLE_TAP, RIGHT, DOWN)
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // UP Button
                 DirectionalPadButton(
                     label = "UP (JUMP)",
                     directionCode = SwipeControllerService.DIRECTION_UP,
@@ -721,7 +951,6 @@ private fun ManualGestureDeckCard(
                     testTag = "swipe_up_button"
                 )
 
-                // LEFT + DOUBLE_TAP + RIGHT Row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
@@ -773,7 +1002,6 @@ private fun ManualGestureDeckCard(
                     )
                 }
 
-                // DOWN Button
                 DirectionalPadButton(
                     label = "DOWN (ROLL)",
                     directionCode = SwipeControllerService.DIRECTION_DOWN,
@@ -784,7 +1012,6 @@ private fun ManualGestureDeckCard(
                 )
             }
 
-            // Live Gesture Vector Trajectory Canvas
             GestureTrajectoryCanvas(
                 latestStroke = latestStroke,
                 latestDirectionPair = latestDirectionPair
@@ -859,7 +1086,6 @@ private fun GestureTuningCard(
                 color = MaterialTheme.colorScheme.onSurface
             )
 
-            // Duration Slider
             Column {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -889,7 +1115,6 @@ private fun GestureTuningCard(
                 )
             }
 
-            // Amplitude Slider
             Column {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -919,7 +1144,6 @@ private fun GestureTuningCard(
                 )
             }
 
-            // Milestone Auto-Jump Interval Slider (default 3000ms = 3.0s)
             Column {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1040,6 +1264,7 @@ private fun EmptyTelemetryPlaceholder() {
 private fun TelemetryEventRow(event: GestureTelemetryEvent) {
     val timeFormatter = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     val formattedTime = timeFormatter.format(Date(event.timestampMillis))
+    val actionName = com.example.feature.swipe.data.repository.SwipeTelemetryRepository.mapDirectionToGameAction(event.direction)
 
     Card(
         shape = RoundedCornerShape(14.dp),
@@ -1067,7 +1292,7 @@ private fun TelemetryEventRow(event: GestureTelemetryEvent) {
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         Text(
-                            text = "performSwipe(\"${event.direction}\")",
+                            text = "$actionName • performSwipe(\"${event.direction}\")",
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = JetBrainsMonoFamily,
                             color = if (event.direction == "DOUBLE_TAP") KineticCoral else ElectricCyan,

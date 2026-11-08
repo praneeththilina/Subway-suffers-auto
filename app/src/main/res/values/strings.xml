@@ -4,14 +4,21 @@
     <string name="accessibility_service_description">Dispatches automated UP, DOWN, LEFT, RIGHT, and DOUBLE_TAP gestures using Android GestureDescription API (API 24+) and provides a floating Milestone Test jump controller for games like Subway Surfers.</string>
 
     <string name="hero_title">SwipeController Engine</string>
-    <string name="hero_subtitle">Precision GestureDescription Dispatcher &amp; Subway Surfers Milestone Controller</string>
+    <string name="hero_subtitle">Precision GestureDescription Dispatcher &amp; Translucent Overlay HUD</string>
     <string name="service_status_active">SERVICE CONNECTED</string>
     <string name="service_status_inactive">SERVICE DISCONNECTED</string>
     <string name="enable_accessibility_btn">Open Accessibility Settings</string>
     <string name="refresh_status_btn">Verify Connection</string>
 
+    <string name="overlay_hud_card_title">Translucent Overlay HUD (OverlayService)</string>
+    <string name="overlay_hud_card_desc">Foreground Service using WindowManager + TYPE_APPLICATION_OVERLAY &amp; FLAG_NOT_FOCUSABLE. Displays a mini live camera preview, real-time action label (JUMP, ROLL, LEFT, RIGHT), and Start/Stop tracking toggle without stealing touch focus from Subway Surfers.</string>
+    <string name="grant_overlay_permission">Grant Overlay Permission</string>
+    <string name="grant_camera_permission">Enable Camera Preview</string>
+    <string name="start_overlay_service">Launch Translucent Overlay</string>
+    <string name="stop_overlay_service">Stop Translucent Overlay</string>
+
     <string name="milestone_card_title">Milestone Test: Auto-Jump</string>
-    <string name="milestone_card_desc">Triggers SwipeControllerService.performSwipe(\"UP\") every 3 seconds automatically. Show the floating overlay button, launch Subway Surfers, and watch your character jump automatically.</string>
+    <string name="milestone_card_desc">Triggers SwipeControllerService.performSwipe(\"UP\") every 3 seconds automatically. Launch the Translucent Overlay, open Subway Surfers, and watch your character jump automatically.</string>
     <string name="toggle_floating_overlay">Show Floating Jump Button</string>
     <string name="hide_floating_overlay">Hide Floating Jump Button</string>
     <string name="start_auto_jump">Start 3s Auto-Jump Loop</string>
