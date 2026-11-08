@@ -1,0 +1,150 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "feature/**"
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build variant to compile (debug, release, or both)"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - debug
+          - release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Compile Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Android SDK (API 36.1)
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK Licenses & Install API 36.1 Packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
+          # Install minor API level 36.1 platform if published in sdkmanager channel
+          sdkmanager "platforms;android-36.1" || true
+
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+          cache-read-only: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+
+      - name: Prepare Environment & Secrets (.env)
+        run: |
+          if [ ! -f ".env" ]; then
+            cp .env.example .env
+          fi
+
+      - name: Generate Debug Keystore (Required by debugConfig)
+        run: |
+          if [ ! -f "debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Prepare Release Keystore (From GitHub Secrets or CI Fallback)
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "Decoding release keystore from GitHub Secrets..."
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
+            echo "STORE_PASSWORD=${STORE_PASSWORD}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${KEY_PASSWORD}" >> $GITHUB_ENV
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> $GITHUB_ENV
+          else
+            echo "No RELEASE_KEYSTORE_BASE64 secret configured; generating self-signed CI upload keystore..."
+            keytool -genkeypair -v \
+              -keystore my-upload-key.jks \
+              -storepass android \
+              -alias upload \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=SwipeController Upload,O=AIStudio,C=US"
+            echo "STORE_PASSWORD=android" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=android" >> $GITHUB_ENV
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> $GITHUB_ENV
+          fi
+
+      - name: Run Unit Tests (ExampleUnitTest)
+        run: gradle :app:testDebugUnitTest --tests "com.example.ExampleUnitTest" --no-daemon
+
+      - name: Compile Debug APK
+        if: ${{ github.event.inputs.build_type != 'release' }}
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Compile Signed Release APK
+        if: ${{ github.event.inputs.build_type != 'debug' }}
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Upload Debug APK Artifact
+        if: ${{ github.event.inputs.build_type != 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwipeController-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Release APK Artifact
+        if: ${{ github.event.inputs.build_type != 'debug' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwipeController-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish APKs to GitHub Release (On Tag Push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk

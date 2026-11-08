@@ -1,0 +1,42 @@
+<resources>
+    <string name="app_name">SwipeController</string>
+    <string name="accessibility_service_label">SwipeController Gesture Service</string>
+    <string name="accessibility_service_description">Dispatches automated UP, DOWN, LEFT, RIGHT, and DOUBLE_TAP gestures using Android GestureDescription API (API 24+) and provides a floating Milestone Test jump controller for games like Subway Surfers.</string>
+
+    <string name="hero_title">SwipeController Engine</string>
+    <string name="hero_subtitle">Precision GestureDescription Dispatcher &amp; Subway Surfers Milestone Controller</string>
+    <string name="service_status_active">SERVICE CONNECTED</string>
+    <string name="service_status_inactive">SERVICE DISCONNECTED</string>
+    <string name="enable_accessibility_btn">Open Accessibility Settings</string>
+    <string name="refresh_status_btn">Verify Connection</string>
+
+    <string name="milestone_card_title">Milestone Test: Auto-Jump</string>
+    <string name="milestone_card_desc">Triggers SwipeControllerService.performSwipe(\"UP\") every 3 seconds automatically. Show the floating overlay button, launch Subway Surfers, and watch your character jump automatically.</string>
+    <string name="toggle_floating_overlay">Show Floating Jump Button</string>
+    <string name="hide_floating_overlay">Hide Floating Jump Button</string>
+    <string name="start_auto_jump">Start 3s Auto-Jump Loop</string>
+    <string name="stop_auto_jump">Stop 3s Auto-Jump Loop</string>
+    <string name="launch_subway_surfers">Launch Subway Surfers</string>
+    <string name="open_runner_sandbox">Open Built-In Runner Sandbox</string>
+
+    <string name="manual_deck_title">Gesture Dispatch Deck</string>
+    <string name="manual_deck_subtitle">Test performSwipe(direction: String) directly or watch the live touch trajectory canvas</string>
+    <string name="gesture_up">UP</string>
+    <string name="gesture_down">DOWN</string>
+    <string name="gesture_left">LEFT</string>
+    <string name="gesture_right">RIGHT</string>
+    <string name="gesture_double_tap">DOUBLE_TAP</string>
+
+    <string name="tuning_title">Stroke &amp; Timing Parameters</string>
+    <string name="swipe_duration_label">Swipe Duration</string>
+    <string name="swipe_amplitude_label">Swipe Distance (% Screen)</string>
+    <string name="auto_interval_label">Milestone Auto-Swipe Interval</string>
+
+    <string name="telemetry_title">Live Gesture Telemetry Log</string>
+    <string name="clear_logs">Clear Log</string>
+    <string name="empty_logs">No gestures dispatched yet. Enable the Accessibility Service or tap any direction pad button to test.</string>
+
+    <string name="sandbox_title">Subway Runner Milestone Sandbox</string>
+    <string name="sandbox_subtitle">Reacts to real GestureDescription touches &amp; performSwipe(\"UP\") events</string>
+    <string name="close_sandbox">Back to Controller</string>
+</resources>
