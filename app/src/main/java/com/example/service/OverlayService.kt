@@ -78,6 +78,9 @@ class OverlayService : Service(), LifecycleOwner {
     private var subStatusTextView: TextView? = null
     private var startStopToggleButton: TextView? = null
 
+    private var poseLandmarkerController: com.example.feature.swipe.data.tracking.PoseLandmarkerController? = null
+    private var deviceMotionTracker: com.example.feature.swipe.data.tracking.DeviceMotionSensorTracker? = null
+
     private var localTrackingActive = false
     private var nextJumpTickMs = 0L
 
@@ -109,6 +112,13 @@ class OverlayService : Service(), LifecycleOwner {
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+
+        poseLandmarkerController = com.example.feature.swipe.data.tracking.PoseLandmarkerController(this) { dir ->
+            SwipeControllerService.performSwipeWithSource(dir, "MediaPipe Pose Overlay")
+        }
+        deviceMotionTracker = com.example.feature.swipe.data.tracking.DeviceMotionSensorTracker(this) { dir ->
+            SwipeControllerService.performSwipeWithSource(dir, "Device Motion Overlay")
+        }
 
         windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
         startForegroundWithNotification()
@@ -142,6 +152,8 @@ class OverlayService : Service(), LifecycleOwner {
 
     override fun onDestroy() {
         stopTrackingLoop()
+        deviceMotionTracker?.stopListening()
+        poseLandmarkerController?.release()
         removeTranslucentOverlay()
         SwipeTelemetryRepository.setApplicationOverlayRunning(false)
         serviceScope.cancel()
@@ -523,38 +535,45 @@ class OverlayService : Service(), LifecycleOwner {
             return
         }
 
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            runCatching {
-                val cameraProvider = cameraProviderFuture.get()
-                val preview = Preview.Builder().build().also {
-                    it.surfaceProvider = pv.surfaceProvider
-                }
-                val selector = when {
-                    cameraProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) ->
-                        CameraSelector.DEFAULT_FRONT_CAMERA
-                    cameraProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) ->
-                        CameraSelector.DEFAULT_BACK_CAMERA
-                    else -> null
-                }
+        val controller = poseLandmarkerController
+        if (controller != null) {
+            controller.bindCameraPoseStream(this, pv)
+            pv.visibility = View.VISIBLE
+            statusTv.visibility = View.GONE
+        } else {
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+            cameraProviderFuture.addListener({
+                runCatching {
+                    val cameraProvider = cameraProviderFuture.get()
+                    val preview = Preview.Builder().build().also {
+                        it.surfaceProvider = pv.surfaceProvider
+                    }
+                    val selector = when {
+                        cameraProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) ->
+                            CameraSelector.DEFAULT_FRONT_CAMERA
+                        cameraProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) ->
+                            CameraSelector.DEFAULT_BACK_CAMERA
+                        else -> null
+                    }
 
-                if (selector != null) {
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(this, selector, preview)
-                    pv.visibility = View.VISIBLE
-                    statusTv.visibility = View.GONE
-                } else {
+                    if (selector != null) {
+                        cameraProvider.unbindAll()
+                        cameraProvider.bindToLifecycle(this, selector, preview)
+                        pv.visibility = View.VISIBLE
+                        statusTv.visibility = View.GONE
+                    } else {
+                        pv.visibility = View.GONE
+                        statusTv.visibility = View.VISIBLE
+                        statusTv.text = "CAM\nSIM"
+                    }
+                }.onFailure { e ->
+                    Log.w(TAG, "Mini camera preview fallback activated", e)
                     pv.visibility = View.GONE
                     statusTv.visibility = View.VISIBLE
                     statusTv.text = "CAM\nSIM"
                 }
-            }.onFailure { e ->
-                Log.w(TAG, "Mini camera preview fallback activated", e)
-                pv.visibility = View.GONE
-                statusTv.visibility = View.VISIBLE
-                statusTv.text = "CAM\nSIM"
-            }
-        }, ContextCompat.getMainExecutor(this))
+            }, ContextCompat.getMainExecutor(this))
+        }
     }
 
     private fun observeGestureTelemetry() {
@@ -568,7 +587,18 @@ class OverlayService : Service(), LifecycleOwner {
         // Observe tracking state and countdown
         serviceScope.launch {
             SwipeTelemetryRepository.isAutoJumpRunning.collectLatest { isRunning ->
-                syncToggleUi(isRunning)
+                syncToggleUi(isRunning || SwipeTelemetryRepository.isMovementTrackingActive.value)
+            }
+        }
+
+        serviceScope.launch {
+            SwipeTelemetryRepository.isMovementTrackingActive.collectLatest { isPoseTracking ->
+                if (isPoseTracking) {
+                    deviceMotionTracker?.startListening()
+                } else {
+                    deviceMotionTracker?.stopListening()
+                }
+                syncToggleUi(isPoseTracking || SwipeTelemetryRepository.isAutoJumpRunning.value)
             }
         }
 
@@ -577,6 +607,23 @@ class OverlayService : Service(), LifecycleOwner {
                 if (SwipeTelemetryRepository.isAutoJumpRunning.value) {
                     val count = SwipeTelemetryRepository.autoJumpTotalCount.value
                     subStatusTextView?.text = String.format("Next UP: %.1fs (#%d)", remainingMs / 1000f, count)
+                }
+            }
+        }
+
+        serviceScope.launch {
+            SwipeTelemetryRepository.poseCalibrationState.collectLatest { poseState ->
+                if (!SwipeTelemetryRepository.isAutoJumpRunning.value &&
+                    SwipeTelemetryRepository.isMovementTrackingActive.value
+                ) {
+                    subStatusTextView?.text = when {
+                        poseState.jumpCancelActive -> "⚡ JUMP-CANCEL!"
+                        poseState.horizontalState == com.example.feature.swipe.domain.model.AxisLockState.WAITING_FOR_NEUTRAL ->
+                            "X: WAIT_NEUTRAL (${poseState.horizontalNeutralProgressMs}ms)"
+                        poseState.verticalState == com.example.feature.swipe.domain.model.AxisLockState.WAITING_FOR_NEUTRAL ->
+                            "Y: WAIT_NEUTRAL (${poseState.verticalNeutralProgressMs}ms)"
+                        else -> "NEUTRAL READY"
+                    }
                 }
             }
         }
@@ -596,8 +643,11 @@ class OverlayService : Service(), LifecycleOwner {
     }
 
     private fun toggleStartStopTracking() {
-        val currentlyRunning = SwipeTelemetryRepository.isAutoJumpRunning.value
-        val nextRunning = !currentlyRunning
+        val currentlyTracking = SwipeTelemetryRepository.isMovementTrackingActive.value ||
+            SwipeTelemetryRepository.isAutoJumpRunning.value
+        val nextRunning = !currentlyTracking
+
+        SwipeTelemetryRepository.setMovementTrackingActive(nextRunning)
 
         if (SwipeControllerService.isServiceActive()) {
             stopLocalLoopOnly()

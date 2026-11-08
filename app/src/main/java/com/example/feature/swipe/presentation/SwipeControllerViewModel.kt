@@ -13,8 +13,11 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.feature.swipe.data.repository.SwipeTelemetryRepository
+import com.example.feature.swipe.data.tracking.DeviceMotionSensorTracker
 import com.example.feature.swipe.domain.model.GestureStrokePoint
 import com.example.feature.swipe.domain.model.GestureTelemetryEvent
+import com.example.feature.swipe.domain.model.MovementInputMode
+import com.example.feature.swipe.domain.model.PoseCalibrationState
 import com.example.feature.swipe.domain.model.SwipeTuningConfig
 import com.example.feature.swipe.domain.usecase.PerformSwipeUseCase
 import com.example.service.OverlayService
@@ -36,6 +39,9 @@ data class SwipeControllerUiState(
     val canDrawOverlays: Boolean = false,
     val hasCameraPermission: Boolean = false,
     val isCameraPreviewEnabled: Boolean = true,
+    val movementInputMode: MovementInputMode = MovementInputMode.CAMERA_POSE,
+    val isMovementTrackingActive: Boolean = false,
+    val poseCalibrationState: PoseCalibrationState = PoseCalibrationState(),
     val lastActionLabel: String = "READY",
     val isAutoJumpRunning: Boolean = false,
     val autoJumpCountdownMs: Long = 3000L,
@@ -60,6 +66,7 @@ class SwipeControllerViewModel(
     private val _statusBannerMessage = MutableStateFlow<String?>(null)
 
     private var localAutoJumpJob: Job? = null
+    private var inAppMotionTracker: DeviceMotionSensorTracker? = null
 
     val uiState: StateFlow<SwipeControllerUiState> = combine(
         SwipeTelemetryRepository.isServiceConnected,
@@ -68,6 +75,9 @@ class SwipeControllerViewModel(
         _canDrawOverlays,
         _hasCameraPermission,
         SwipeTelemetryRepository.isCameraPreviewEnabledInOverlay,
+        SwipeTelemetryRepository.movementInputMode,
+        SwipeTelemetryRepository.isMovementTrackingActive,
+        SwipeTelemetryRepository.poseCalibrationState,
         SwipeTelemetryRepository.lastActionLabel,
         SwipeTelemetryRepository.isAutoJumpRunning,
         SwipeTelemetryRepository.autoJumpCountdownMs,
@@ -88,17 +98,20 @@ class SwipeControllerViewModel(
             canDrawOverlays = values[3] as Boolean,
             hasCameraPermission = values[4] as Boolean,
             isCameraPreviewEnabled = values[5] as Boolean,
-            lastActionLabel = values[6] as String,
-            isAutoJumpRunning = values[7] as Boolean,
-            autoJumpCountdownMs = values[8] as Long,
-            autoJumpTotalCount = values[9] as Int,
-            tuningConfig = values[10] as SwipeTuningConfig,
-            telemetryLogs = values[11] as List<GestureTelemetryEvent>,
-            latestGestureStroke = values[12] as GestureStrokePoint?,
-            latestDispatchedDirection = values[13] as Pair<String, Long>?,
-            isInAppFloatingFabVisible = values[14] as Boolean,
-            isRunnerSandboxOpen = values[15] as Boolean,
-            statusBannerMessage = values[16] as String?
+            movementInputMode = values[6] as MovementInputMode,
+            isMovementTrackingActive = values[7] as Boolean,
+            poseCalibrationState = values[8] as PoseCalibrationState,
+            lastActionLabel = values[9] as String,
+            isAutoJumpRunning = values[10] as Boolean,
+            autoJumpCountdownMs = values[11] as Long,
+            autoJumpTotalCount = values[12] as Int,
+            tuningConfig = values[13] as SwipeTuningConfig,
+            telemetryLogs = values[14] as List<GestureTelemetryEvent>,
+            latestGestureStroke = values[15] as GestureStrokePoint?,
+            latestDispatchedDirection = values[16] as Pair<String, Long>?,
+            isInAppFloatingFabVisible = values[17] as Boolean,
+            isRunnerSandboxOpen = values[18] as Boolean,
+            statusBannerMessage = values[19] as String?
         )
     }.stateIn(
         scope = viewModelScope,
@@ -121,14 +134,90 @@ class SwipeControllerViewModel(
             context,
             Manifest.permission.CAMERA
         ) == PackageManager.PERMISSION_GRANTED
+
+        if (inAppMotionTracker == null) {
+            inAppMotionTracker = DeviceMotionSensorTracker(context.applicationContext) { dir ->
+                performSwipeUseCase(dir, "Device Motion Sensor")
+            }
+        }
+    }
+
+    fun selectMovementInputMode(mode: MovementInputMode, context: Context) {
+        SwipeTelemetryRepository.setMovementInputMode(mode)
+        if (SwipeTelemetryRepository.isMovementTrackingActive.value) {
+            if (mode == MovementInputMode.DEVICE_MOTION) {
+                inAppMotionTracker?.startListening()
+            } else {
+                inAppMotionTracker?.stopListening()
+            }
+        }
+        _statusBannerMessage.value = "Selected ${mode.title}."
+    }
+
+    fun toggleMovementTracking(context: Context) {
+        val nextActive = !SwipeTelemetryRepository.isMovementTrackingActive.value
+        SwipeTelemetryRepository.setMovementTrackingActive(nextActive)
+
+        if (nextActive) {
+            if (SwipeTelemetryRepository.movementInputMode.value == MovementInputMode.DEVICE_MOTION) {
+                if (inAppMotionTracker == null) {
+                    inAppMotionTracker = DeviceMotionSensorTracker(context.applicationContext) { dir ->
+                        performSwipeUseCase(dir, "Device Motion Sensor")
+                    }
+                }
+                inAppMotionTracker?.startListening()
+            }
+            _statusBannerMessage.value =
+                "Movement Tracking ACTIVE (${SwipeTelemetryRepository.movementInputMode.value.title}, 250ms debounce)!"
+        } else {
+            inAppMotionTracker?.stopListening()
+            _statusBannerMessage.value = "Movement Tracking paused."
+        }
+    }
+
+    fun recalibratePoseCenter() {
+        SwipeTelemetryRepository.recalibrateToCurrentPose()
+        inAppMotionTracker?.recalibrateBaseline()
+        _statusBannerMessage.value = "Calibrated neutral Nose & Shoulder center point!"
+    }
+
+    /**
+     * Feeds normalized (x, y) pose coordinates into the MediaPipe Pose threshold evaluator
+     * (including 250ms debounce cooldown) and triggers performSwipe(direction) when exceeded.
+     */
+    fun onInteractivePoseUpdated(normX: Float, normY: Float) {
+        val detectedDir = SwipeTelemetryRepository.processPoseLandmarksAndEvaluateDirection(
+            noseX = normX,
+            noseY = (normY - 0.08f).coerceIn(0.02f, 0.98f),
+            leftShoulderX = (normX - 0.12f).coerceIn(0.02f, 0.98f),
+            leftShoulderY = (normY + 0.07f).coerceIn(0.02f, 0.98f),
+            rightShoulderX = (normX + 0.12f).coerceIn(0.02f, 0.98f),
+            rightShoulderY = (normY + 0.07f).coerceIn(0.02f, 0.98f),
+            nowMs = System.currentTimeMillis()
+        )
+        if (detectedDir != null) {
+            val sourceLabel = if (SwipeTelemetryRepository.movementInputMode.value == MovementInputMode.CAMERA_POSE) {
+                "MediaPipe Pose (250ms)"
+            } else {
+                "Device Motion (250ms)"
+            }
+            performSwipeUseCase(detectedDir, sourceLabel)
+        }
+    }
+
+    fun updatePoseThresholds(thresholdX: Float, thresholdY: Float) {
+        SwipeTelemetryRepository.updatePoseThresholds(
+            thresholdX = thresholdX,
+            thresholdY = thresholdY
+        )
     }
 
     fun onCameraPermissionResult(granted: Boolean) {
         _hasCameraPermission.value = granted
         _statusBannerMessage.value = if (granted) {
-            "Camera permission granted! Mini camera preview active in Translucent Overlay."
+            "Camera permission granted! MediaPipe Pose Landmarker & Mini Camera Preview ready."
         } else {
-            "Camera permission denied — Translucent Overlay will use vector reticle HUD."
+            "Camera permission denied — use Interactive Pose Radar or Option B (Device Motion)."
         }
     }
 
@@ -321,6 +410,7 @@ class SwipeControllerViewModel(
 
     override fun onCleared() {
         localAutoJumpJob?.cancel()
+        inAppMotionTracker?.stopListening()
         super.onCleared()
     }
 

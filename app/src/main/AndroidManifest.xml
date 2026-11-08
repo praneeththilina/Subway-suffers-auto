@@ -4,6 +4,7 @@
 
     <!-- Required for WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY floating HUD -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Required for OverlayService Foreground Service on Android 9+ and Android 14+ (API 34+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

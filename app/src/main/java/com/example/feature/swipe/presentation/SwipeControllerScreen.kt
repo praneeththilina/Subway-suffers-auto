@@ -210,6 +210,36 @@ fun SwipeControllerScreen(
                         }
 
                         item {
+                            com.example.feature.swipe.presentation.components.MovementInputTrackingCard(
+                                movementInputMode = uiState.movementInputMode,
+                                isTrackingActive = uiState.isMovementTrackingActive,
+                                poseState = uiState.poseCalibrationState,
+                                lastActionLabel = uiState.lastActionLabel,
+                                onSelectMode = { mode ->
+                                    if (mode == com.example.feature.swipe.domain.model.MovementInputMode.CAMERA_POSE && !uiState.hasCameraPermission) {
+                                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                    }
+                                    viewModel.selectMovementInputMode(mode, context)
+                                },
+                                onToggleTracking = {
+                                    if (uiState.movementInputMode == com.example.feature.swipe.domain.model.MovementInputMode.CAMERA_POSE && !uiState.hasCameraPermission) {
+                                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                    }
+                                    viewModel.toggleMovementTracking(context)
+                                },
+                                onRecalibrateCenter = {
+                                    viewModel.recalibratePoseCenter()
+                                },
+                                onSimulatePoseDrag = { normX, normY ->
+                                    viewModel.onInteractivePoseUpdated(normX, normY)
+                                },
+                                onThresholdChange = { tx, ty ->
+                                    viewModel.updatePoseThresholds(tx, ty)
+                                }
+                            )
+                        }
+
+                        item {
                             MilestoneAutoJumpCard(
                                 isServiceConnected = uiState.isServiceConnected,
                                 isFloatingOverlayVisible = uiState.isFloatingOverlayVisible,

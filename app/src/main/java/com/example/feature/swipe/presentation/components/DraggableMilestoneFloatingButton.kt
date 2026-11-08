@@ -301,6 +301,12 @@ private fun MiniCameraPreviewBox(
         ) == PackageManager.PERMISSION_GRANTED
     }
 
+    val poseController = remember(context) {
+        com.example.feature.swipe.data.tracking.PoseLandmarkerController(context.applicationContext) { dir ->
+            SwipeControllerService.performSwipeWithSource(dir, "MediaPipe Pose LIVE_STREAM")
+        }
+    }
+
     var cameraBoundSuccessfully by remember { mutableStateOf(false) }
 
     Box(
@@ -316,27 +322,8 @@ private fun MiniCameraPreviewBox(
                     }
                 },
                 update = { previewView ->
-                    val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-                    cameraProviderFuture.addListener({
-                        runCatching {
-                            val provider = cameraProviderFuture.get()
-                            val preview = Preview.Builder().build().also {
-                                it.surfaceProvider = previewView.surfaceProvider
-                            }
-                            val selector = when {
-                                provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) ->
-                                    CameraSelector.DEFAULT_FRONT_CAMERA
-                                provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) ->
-                                    CameraSelector.DEFAULT_BACK_CAMERA
-                                else -> null
-                            }
-                            if (selector != null) {
-                                provider.unbindAll()
-                                provider.bindToLifecycle(lifecycleOwner, selector, preview)
-                                cameraBoundSuccessfully = true
-                            }
-                        }
-                    }, ContextCompat.getMainExecutor(context))
+                    poseController.bindCameraPoseStream(lifecycleOwner, previewView)
+                    cameraBoundSuccessfully = true
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -387,6 +374,7 @@ private fun MiniCameraPreviewBox(
 
     DisposableEffect(Unit) {
         onDispose {
+            poseController.release()
             if (hasCamPerm) {
                 runCatching {
                     ProcessCameraProvider.getInstance(context).get().unbindAll()
